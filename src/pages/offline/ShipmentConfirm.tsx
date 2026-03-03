@@ -7,6 +7,7 @@ interface ShipmentItem {
   skuId: string;
   skuName: string;
   orderedQty: number;
+  sentQty: number;      // 실제 발송 수량 (사용자 입력)
   inventoryQty: number; // 오프라인샵 현재 재고
   isShortage: boolean;
   isMarking: boolean;
@@ -133,6 +134,7 @@ export default function ShipmentConfirm() {
         skuId: c.skuId,
         skuName: c.skuName,
         orderedQty: c.needed,
+        sentQty: c.needed,   // 기본값: 주문 수량 (사용자가 직접 수정 가능)
         inventoryQty: inventoryMap[c.skuId] || 0,
         isShortage: (inventoryMap[c.skuId] || 0) < c.needed,
         isMarking: c.isMarking,
@@ -146,42 +148,78 @@ export default function ShipmentConfirm() {
     }
   };
 
+  const handleSentChange = (skuId: string, value: number) => {
+    setItems((prev) =>
+      prev.map((item) =>
+        item.skuId === skuId ? { ...item, sentQty: Math.max(0, value) } : item
+      )
+    );
+  };
+
   const handleConfirm = async () => {
     if (!selectedWo) return;
     setConfirming(true);
     setConfirmProgress(null);
     setError(null);
     try {
+      // 실제 발송 수량 맵 (skuId → sentQty)
+      const sentMap: Record<string, number> = {};
+      for (const item of items) sentMap[item.skuId] = item.sentQty;
+
       // 상태를 '이관중'으로 변경
-      setConfirmProgress({ current: 1, total: 2, step: '발송 상태 업데이트 중...' });
+      setConfirmProgress({ current: 1, total: 4, step: '발송 상태 업데이트 중...' });
       const { error: statusErr } = await supabase
         .from('work_order')
         .update({ status: '이관중' })
         .eq('id', selectedWo.id);
       if (statusErr) throw statusErr;
 
-      // 라인의 sent_qty를 ordered_qty로 업데이트
+      // 라인 + BOM 데이터 조회
+      setConfirmProgress({ current: 2, total: 4, step: '데이터 조회 중...' });
       const { data: lines, error: linesErr } = await supabase
         .from('work_order_line')
-        .select('id, ordered_qty')
+        .select('id, finished_sku_id, ordered_qty, needs_marking')
         .eq('work_order_id', selectedWo.id);
       if (linesErr) throw linesErr;
 
-      const lineCount = (lines || []).length;
-      const totalSteps = lineCount + items.length + 1;
-      let step = 1;
+      const { data: bomData, error: bomErr } = await supabase
+        .from('bom')
+        .select('finished_sku_id, component_sku_id, quantity');
+      if (bomErr) throw bomErr;
 
-      for (let i = 0; i < (lines || []).length; i++) {
-        const line = (lines as any[])[i];
-        setConfirmProgress({ current: step, total: totalSteps, step: `라인 처리 중... (${i + 1} / ${lineCount})` });
+      const lineList = (lines || []) as any[];
+      const totalSteps = lineList.length + items.length + 2;
+      let step = 3;
+
+      // 실제 발송 수량 기준으로 sent_qty 업데이트
+      for (let i = 0; i < lineList.length; i++) {
+        const line = lineList[i];
+        setConfirmProgress({ current: step, total: totalSteps, step: `라인 처리 중... (${i + 1} / ${lineList.length})` });
+
+        let lineSentQty: number;
+        if (!line.needs_marking) {
+          // 완제품: 해당 SKU의 발송 수량 직접 사용
+          lineSentQty = sentMap[line.finished_sku_id] ?? line.ordered_qty;
+        } else {
+          // 마킹 완제품: BOM 비율로 역산
+          const boms = (bomData || []).filter((b: any) => b.finished_sku_id === line.finished_sku_id);
+          if (boms.length > 0) {
+            lineSentQty = Math.min(
+              ...boms.map((b: any) => Math.floor((sentMap[b.component_sku_id] || 0) / b.quantity))
+            );
+          } else {
+            lineSentQty = line.ordered_qty;
+          }
+        }
+
         await supabase
           .from('work_order_line')
-          .update({ sent_qty: line.ordered_qty })
+          .update({ sent_qty: lineSentQty })
           .eq('id', line.id);
         step++;
       }
 
-      // 오프라인샵 재고 차감
+      // 오프라인샵 재고 차감 (실제 발송 수량 기준)
       const { data: warehouse } = await supabase
         .from('warehouse')
         .select('id')
@@ -196,15 +234,15 @@ export default function ShipmentConfirm() {
           const { data: inv } = await supabase
             .from('inventory')
             .select('id, quantity')
-            .eq('warehouse_id', warehouse.id)
+            .eq('warehouse_id', (warehouse as any).id)
             .eq('sku_id', item.skuId)
             .maybeSingle();
 
           if (inv) {
             await supabase
               .from('inventory')
-              .update({ quantity: Math.max(0, inv.quantity - item.orderedQty) })
-              .eq('id', inv.id);
+              .update({ quantity: Math.max(0, (inv as any).quantity - item.sentQty) })
+              .eq('id', (inv as any).id);
           }
           step++;
         }
@@ -293,26 +331,36 @@ export default function ShipmentConfirm() {
           <div className="mx-4 mt-4 flex items-start gap-2 bg-yellow-50 border border-yellow-200 rounded-lg p-3">
             <AlertTriangle size={16} className="text-yellow-600 flex-shrink-0 mt-0.5" />
             <p className="text-sm text-yellow-800">
-              일부 품목 재고가 부족합니다. 가능한 수량만큼 발송하세요.
+              일부 품목 재고가 부족합니다. 실제 발송 수량을 직접 입력해주세요.
             </p>
           </div>
         )}
 
         <div className="divide-y divide-gray-50">
           {items.map((item) => (
-            <div key={item.skuId} className={`px-5 py-3.5 flex items-center justify-between ${item.isShortage ? 'bg-red-50' : ''}`}>
-              <div>
+            <div key={item.skuId} className={`px-5 py-3.5 flex items-center justify-between gap-3 ${item.isShortage ? 'bg-red-50' : ''}`}>
+              <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-gray-900">{item.skuName}</p>
                 <p className="text-xs text-gray-400 mt-0.5 font-mono">{item.skuId}</p>
               </div>
-              <div className="text-right">
-                <p className="text-sm font-bold text-gray-900">{item.orderedQty}개</p>
+              <div className="flex flex-col items-end gap-0.5">
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="number"
+                    min="0"
+                    value={item.sentQty}
+                    onChange={(e) => handleSentChange(item.skuId, Number(e.target.value))}
+                    className={`w-20 border rounded-lg px-2 py-1 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                      item.sentQty > item.inventoryQty ? 'border-orange-300 bg-orange-50' : 'border-gray-300'
+                    }`}
+                  />
+                  <span className="text-xs text-gray-500">개</span>
+                </div>
+                <p className="text-xs text-gray-400">주문 {item.orderedQty}개</p>
                 {item.isShortage ? (
-                  <p className="text-xs text-red-600 mt-0.5">
-                    재고 {item.inventoryQty}개 (부족)
-                  </p>
+                  <p className="text-xs text-red-500">재고 {item.inventoryQty}개 (부족)</p>
                 ) : (
-                  <p className="text-xs text-gray-400 mt-0.5">재고 {item.inventoryQty}개</p>
+                  <p className="text-xs text-gray-400">재고 {item.inventoryQty}개</p>
                 )}
               </div>
             </div>
@@ -341,21 +389,13 @@ export default function ShipmentConfirm() {
           )}
         </div>
       )}
-      {hasShortage && (
-        <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
-          <AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" />
-          <p className="text-sm text-red-800">
-            재고 부족 품목이 있어 발송을 진행할 수 없습니다. 재고를 보충한 후 다시 시도해주세요.
-          </p>
-        </div>
-      )}
       <button
         onClick={handleConfirm}
-        disabled={confirming || hasShortage}
+        disabled={confirming}
         className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 text-base"
       >
         <Truck size={20} />
-        {confirming ? '처리 중...' : hasShortage ? '재고 부족 — 발송 불가' : '발송 완료 확인'}
+        {confirming ? '처리 중...' : '발송 완료 확인'}
       </button>
       <p className="text-xs text-center text-gray-400">
         버튼 클릭 시 플레이위즈에 발송 완료 신호가 전달됩니다

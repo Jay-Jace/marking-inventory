@@ -106,8 +106,7 @@ export default function ReceiptCheck() {
     setItems((prev) =>
       prev.map((item) => {
         if (item.skuId !== skuId) return item;
-        const clamped = Math.max(0, Math.min(value, item.expectedQty));
-        return { ...item, actualQty: clamped };
+        return { ...item, actualQty: Math.max(0, value) };
       })
     );
   };
@@ -247,17 +246,33 @@ export default function ReceiptCheck() {
                 <p className="text-xs text-gray-400 mt-0.5">예정 {item.expectedQty}개</p>
               </div>
               <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  min="0"
-                  max={item.expectedQty}
-                  value={item.actualQty}
-                  onChange={(e) => handleActualChange(item.skuId, Number(e.target.value))}
-                  className={`w-20 border rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                    item.actualQty !== item.expectedQty ? 'border-red-300 bg-red-50' : 'border-gray-300'
-                  }`}
-                />
-                <span className="text-sm text-gray-500">개</span>
+                <div className="flex flex-col items-end gap-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min="0"
+                      value={item.actualQty}
+                      onChange={(e) => handleActualChange(item.skuId, Number(e.target.value))}
+                      className={`w-20 border rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                        item.actualQty > item.expectedQty
+                          ? 'border-orange-300 bg-orange-50'
+                          : item.actualQty < item.expectedQty
+                          ? 'border-red-300 bg-red-50'
+                          : 'border-gray-300'
+                      }`}
+                    />
+                    <span className="text-sm text-gray-500">개</span>
+                  </div>
+                  {item.actualQty !== item.expectedQty && (
+                    <span className={`text-xs font-medium ${
+                      item.actualQty > item.expectedQty ? 'text-orange-600' : 'text-red-600'
+                    }`}>
+                      {item.actualQty > item.expectedQty
+                        ? `+${item.actualQty - item.expectedQty}`
+                        : `${item.actualQty - item.expectedQty}`}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
           ))}
