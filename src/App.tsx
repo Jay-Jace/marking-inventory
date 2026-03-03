@@ -26,67 +26,87 @@ function AppContent() {
   const [viewAs, setViewAs] = useState<UserRole | null>(null);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    // 5초 타임아웃: getSession이 navigator lock으로 무한 대기하는 경우 방지
-    const timeout = setTimeout(() => {
-      setLoading(false);
-    }, 1000);
+  const defaultPaths: Record<UserRole, string> = {
+    admin: '/admin/dashboard',
+    offline: '/offline/shipment',
+    playwith: '/playwith/receipt',
+  };
 
-    supabase.auth.getSession().then(async ({ data: { session } }) => {
-      clearTimeout(timeout);
-      if (session) {
-        await loadUserProfile(session.user.id, session.user.email || '');
-      } else {
-        setLoading(false);
+  /**
+   * Supabase user_profile을 조회해 AppUser를 설정한다.
+   * shouldNavigate=true 이면 역할별 기본 페이지로 이동한다.
+   * (실제 로그인 시에만 true, 세션 복원·토큰 갱신 시에는 false)
+   */
+  const loadUserProfile = async (
+    userId: string,
+    email: string,
+    shouldNavigate: boolean
+  ) => {
+    try {
+      const { data: profile } = await supabase
+        .from('user_profile')
+        .select('*')
+        .eq('id', userId)
+        .single();
+
+      const appUser: AppUser = profile
+        ? {
+            id: userId,
+            email,
+            role: profile.role as UserRole,
+            name: profile.name,
+          }
+        : { id: userId, email, role: 'admin', name: email };
+
+      setUser(appUser);
+
+      if (shouldNavigate) {
+        navigate(defaultPaths[appUser.role]);
       }
+    } catch (err) {
+      console.error('loadUserProfile error:', err);
+      // 예상치 못한 에러 → 로딩만 해제 (로그인 화면으로 자연스럽게 유도)
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    /**
+     * onAuthStateChange를 단일 진실 원천으로 사용.
+     * getSession() 직접 호출 + 타임아웃 제거.
+     *
+     * 이벤트별 처리:
+     *   INITIAL_SESSION - 앱 시작 시 기존 세션 복원 (navigate 없음)
+     *   SIGNED_IN       - 실제 로그인 성공 (역할별 기본 페이지로 navigate)
+     *   TOKEN_REFRESHED - JWT 자동 갱신 (navigate 없음, user 유지)
+     *   SIGNED_OUT      - 로그아웃 (로그인 페이지로 navigate)
+     */
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'INITIAL_SESSION') {
+        // 기존 세션 복원: 현재 페이지 유지 (navigate 없음)
+        if (session) {
+          await loadUserProfile(session.user.id, session.user.email || '', false);
+        } else {
+          setLoading(false);
+        }
+      } else if (event === 'SIGNED_IN') {
+        // 실제 signInWithPassword 성공 → 역할 기본 페이지로 이동
+        if (session) {
+          await loadUserProfile(session.user.id, session.user.email || '', true);
+        }
+      } else if (event === 'SIGNED_OUT') {
+        setUser(null);
+        setLoading(false);
+        navigate('/login');
+      }
+      // TOKEN_REFRESHED, USER_UPDATED: user 상태 그대로 유지, navigate 없음
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (event === 'SIGNED_IN' && session) {
-          await loadUserProfile(session.user.id, session.user.email || '');
-        } else if (event === 'SIGNED_OUT') {
-          setUser(null);
-          navigate('/login');
-        }
-      }
-    );
-
-    return () => {
-      clearTimeout(timeout);
-      subscription.unsubscribe();
-    };
-  }, []);
-
-  const loadUserProfile = async (userId: string, email: string) => {
-    const { data: profile } = await supabase
-      .from('user_profile')
-      .select('*')
-      .eq('id', userId)
-      .single();
-
-    if (profile) {
-      setUser({
-        id: userId,
-        email,
-        role: profile.role as UserRole,
-        name: profile.name,
-      });
-
-      // 역할별 기본 페이지로 이동
-      const defaultPaths: Record<UserRole, string> = {
-        admin: '/admin/dashboard',
-        offline: '/offline/shipment',
-        playwith: '/playwith/receipt',
-      };
-      navigate(defaultPaths[profile.role as UserRole]);
-    } else {
-      // 프로필이 없으면 admin 기본값 (첫 사용자)
-      setUser({ id: userId, email, role: 'admin', name: email });
-      navigate('/admin/dashboard');
-    }
-    setLoading(false);
-  };
+    return () => subscription.unsubscribe();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loading) {
     return (
@@ -126,7 +146,8 @@ function AppContent() {
         <Route path="/admin/downloads" element={<Downloads />} />
         <Route path="/admin/bom" element={<BOMManage />} />
         <Route path="/admin/inventory" element={<InventoryUpload />} />
-        <Route path="/admin/users" element={<UserManage />} />
+        {/* currentUserId를 prop으로 전달 → UserManage 내 getSession() 중복 제거 */}
+        <Route path="/admin/users" element={<UserManage currentUserId={user.id} />} />
 
         {/* 오프라인 매장 */}
         <Route path="/offline/shipment" element={<ShipmentConfirm />} />

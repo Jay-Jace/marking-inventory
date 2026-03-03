@@ -24,7 +24,11 @@ const roleColor: Record<UserRole, string> = {
   playwith: 'bg-purple-100 text-purple-700',
 };
 
-export default function UserManage() {
+interface Props {
+  currentUserId: string;
+}
+
+export default function UserManage({ currentUserId }: Props) {
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -38,12 +42,7 @@ export default function UserManage() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
-
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session) setCurrentUserId(session.user.id);
-    });
     loadUsers();
   }, []);
 
