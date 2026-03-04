@@ -28,44 +28,49 @@ export default function Dashboard() {
 
   const loadData = async () => {
     setLoading(true);
+    try {
+      // 창고별 재고 요약
+      const { data: invData, error: invError } = await supabase
+        .from('inventory')
+        .select('quantity, warehouse(name)')
+        .gt('quantity', 0);
+      if (invError) throw invError;
 
-    // 창고별 재고 요약
-    const { data: invData } = await supabase
-      .from('inventory')
-      .select('quantity, warehouse(name)')
-      .gt('quantity', 0);
-
-    if (invData) {
-      const summary: Record<string, InventorySummary> = {};
-      for (const row of invData as any[]) {
-        const name = row.warehouse?.name || '알 수 없음';
-        if (!summary[name]) summary[name] = { warehouseName: name, totalSkus: 0, totalQty: 0 };
-        summary[name].totalSkus++;
-        summary[name].totalQty += row.quantity;
+      if (invData) {
+        const summary: Record<string, InventorySummary> = {};
+        for (const row of invData as any[]) {
+          const name = row.warehouse?.name || '알 수 없음';
+          if (!summary[name]) summary[name] = { warehouseName: name, totalSkus: 0, totalQty: 0 };
+          summary[name].totalSkus++;
+          summary[name].totalQty += row.quantity;
+        }
+        setInventories(Object.values(summary));
       }
-      setInventories(Object.values(summary));
+
+      // 진행 중인 작업지시서
+      const { data: woData, error: woError } = await supabase
+        .from('work_order')
+        .select('id, download_date, status, work_order_line(id)')
+        .not('status', 'in', '("출고완료")')
+        .order('uploaded_at', { ascending: false })
+        .limit(10);
+      if (woError) throw woError;
+
+      if (woData) {
+        setActiveOrders(
+          (woData as any[]).map((wo) => ({
+            id: wo.id,
+            downloadDate: wo.download_date,
+            status: wo.status,
+            lineCount: wo.work_order_line?.length || 0,
+          }))
+        );
+      }
+    } catch (err) {
+      console.error('loadData error:', err);
+    } finally {
+      setLoading(false);
     }
-
-    // 진행 중인 작업지시서
-    const { data: woData } = await supabase
-      .from('work_order')
-      .select('id, download_date, status, work_order_line(id)')
-      .not('status', 'in', '("출고완료")')
-      .order('uploaded_at', { ascending: false })
-      .limit(10);
-
-    if (woData) {
-      setActiveOrders(
-        (woData as any[]).map((wo) => ({
-          id: wo.id,
-          downloadDate: wo.download_date,
-          status: wo.status,
-          lineCount: wo.work_order_line?.length || 0,
-        }))
-      );
-    }
-
-    setLoading(false);
   };
 
   const handleDelete = async (workOrderId: string) => {

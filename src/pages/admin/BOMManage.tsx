@@ -30,14 +30,20 @@ export default function BOMManage() {
 
   const loadBoms = async () => {
     setLoading(true);
-    const { data } = await supabase
-      .from('bom')
-      .select(
-        'id, finished_sku_id, finished_sku:sku!bom_finished_sku_id_fkey(sku_name), component_sku_id, component:sku!bom_component_sku_id_fkey(sku_name), quantity'
-      )
-      .order('finished_sku_id');
-    setBoms((data || []) as any[]);
-    setLoading(false);
+    try {
+      const { data, error } = await supabase
+        .from('bom')
+        .select(
+          'id, finished_sku_id, finished_sku:sku!bom_finished_sku_id_fkey(sku_name), component_sku_id, component:sku!bom_component_sku_id_fkey(sku_name), quantity'
+        )
+        .order('finished_sku_id');
+      if (error) throw error;
+      setBoms((data || []) as any[]);
+    } catch (err) {
+      console.error('loadBoms error:', err);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const uploadBomRows = async (rows: RawBomRow[]) => {
@@ -125,8 +131,14 @@ export default function BOMManage() {
 
   const handleDelete = async (id: string) => {
     if (!confirm('이 BOM 항목을 삭제하시겠습니까?')) return;
-    await supabase.from('bom').delete().eq('id', id);
-    loadBoms();
+    try {
+      const { error } = await supabase.from('bom').delete().eq('id', id);
+      if (error) throw error;
+      loadBoms();
+    } catch (err) {
+      console.error('handleDelete error:', err);
+      alert('삭제 중 오류가 발생했습니다.');
+    }
   };
 
   // 완제품별로 그룹화

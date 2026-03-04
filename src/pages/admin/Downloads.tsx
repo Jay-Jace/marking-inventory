@@ -29,19 +29,29 @@ export default function Downloads() {
   }, []);
 
   const loadWorkOrders = async () => {
-    const { data } = await supabase
-      .from('work_order')
-      .select('id, download_date, status')
-      .order('uploaded_at', { ascending: false });
-    setWorkOrders((data || []) as WorkOrderOption[]);
-    if (data && data.length > 0) setSelectedWoId(data[0].id);
+    try {
+      const { data, error } = await supabase
+        .from('work_order')
+        .select('id, download_date, status')
+        .order('uploaded_at', { ascending: false });
+      if (error) throw error;
+      setWorkOrders((data || []) as WorkOrderOption[]);
+      if (data && data.length > 0) setSelectedWoId(data[0].id);
+    } catch (err) {
+      console.error('loadWorkOrders error:', err);
+    }
   };
 
   const loadWarehouses = async () => {
-    const { data } = await supabase.from('warehouse').select('*');
-    const map: Record<string, any> = {};
-    (data || []).forEach((w: any) => (map[w.name] = w));
-    setWarehouses(map);
+    try {
+      const { data, error } = await supabase.from('warehouse').select('*');
+      if (error) throw error;
+      const map: Record<string, any> = {};
+      (data || []).forEach((w: any) => (map[w.name] = w));
+      setWarehouses(map);
+    } catch (err) {
+      console.error('loadWarehouses error:', err);
+    }
   };
 
   const selectedWo = workOrders.find((w) => w.id === selectedWoId);
@@ -61,7 +71,7 @@ export default function Downloads() {
   const handleDownloadStep1 = async () => {
     if (!selectedWoId) return;
     setLoading(true);
-
+    try {
     const { data: lines } = await supabase
       .from('work_order_line')
       .select('*, finished_sku(sku_id, sku_name)')
@@ -130,15 +140,19 @@ export default function Downloads() {
       fromWarehouseName: offlineWarehouse?.name || '오프라인샵',
       toWarehouseName: playwithWarehouse?.name || '플레이위즈',
     });
-
-    setLoading(false);
+    } catch (err) {
+      console.error('handleDownloadStep1 error:', err);
+      alert('다운로드 중 오류가 발생했습니다.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   // STEP 2: 재고조정 (제작창고 P증가)
   const handleDownloadStep2 = async () => {
     if (!selectedWoId) return;
     setLoading(true);
-
+    try {
     const { data: lines } = await supabase
       .from('work_order_line')
       .select('*, finished_sku(sku_id, sku_name)')
@@ -178,14 +192,19 @@ export default function Downloads() {
       selectedWo?.download_date || new Date().toISOString().split('T')[0],
       '제작창고P증가'
     );
-    setLoading(false);
+    } catch (err) {
+      console.error('handleDownloadStep2 error:', err);
+      alert('다운로드 중 오류가 발생했습니다.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   // STEP 3: 재고조정(제작창고 M차감) + CJ입고요청 + 생산입고요청
   const handleDownloadStep3 = async () => {
     if (!selectedWoId) return;
     setLoading(true);
-
+    try {
     // 당일 완료된 마킹 데이터
     const { data: markings } = await supabase
       .from('daily_marking')
@@ -263,8 +282,12 @@ export default function Downloads() {
     if (mAdjLines.length > 0) exportInventoryAdjustment(mAdjLines, today, '제작창고M차감');
     if (cjLines.length > 0) exportCjReceiptRequest(cjLines, today);
     if (productionLines.length > 0) exportProductionReceiptRequest(productionLines, today);
-
-    setLoading(false);
+    } catch (err) {
+      console.error('handleDownloadStep3 error:', err);
+      alert('다운로드 중 오류가 발생했습니다.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const steps = [
