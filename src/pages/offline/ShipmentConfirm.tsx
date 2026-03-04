@@ -359,6 +359,9 @@ export default function ShipmentConfirm() {
   }
 
   const hasShortage = items.some((item) => item.isShortage);
+  const totalUniformQty = items.filter((i) => !i.isMarking).reduce((s, i) => s + i.sentQty, 0);
+  const totalMarkingQty = items.filter((i) => i.isMarking).reduce((s, i) => s + i.sentQty, 0);
+  const totalSentQty = totalUniformQty + totalMarkingQty;
 
   return (
     <div className="space-y-5 max-w-lg">
@@ -489,6 +492,22 @@ export default function ShipmentConfirm() {
         <div className="px-5 py-4 border-b border-gray-50">
           <h3 className="font-medium text-gray-900">📦 제작센터(플레이위즈)로 보낼 물량</h3>
           <p className="text-sm text-gray-500 mt-0.5">{selectedWo?.download_date} 기준</p>
+        </div>
+
+        {/* 총 수량 합계 */}
+        <div className="px-5 py-3 bg-blue-50/60 border-b border-gray-100 space-y-1">
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-blue-700">👕 유니폼 소계</span>
+            <span className="font-semibold text-blue-800">{totalUniformQty}개</span>
+          </div>
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-purple-700">🎨 마킹 소계</span>
+            <span className="font-semibold text-purple-800">{totalMarkingQty}개</span>
+          </div>
+          <div className="border-t border-blue-200 pt-1 mt-1 flex items-center justify-between text-sm">
+            <span className="font-bold text-gray-800">📦 총 발송 수량</span>
+            <span className="font-bold text-gray-900 text-base">{totalSentQty}개</span>
+          </div>
         </div>
 
         {hasShortage && (
