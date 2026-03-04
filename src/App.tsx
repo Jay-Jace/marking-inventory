@@ -74,17 +74,26 @@ function AppContent() {
   useEffect(() => {
     /**
      * onAuthStateChange를 단일 진실 원천으로 사용.
-     * getSession() 직접 호출 + 타임아웃 제거.
      *
      * 이벤트별 처리:
      *   INITIAL_SESSION - 앱 시작 시 기존 세션 복원 (navigate 없음)
      *   SIGNED_IN       - 실제 로그인 성공 (역할별 기본 페이지로 navigate)
      *   TOKEN_REFRESHED - JWT 자동 갱신 (navigate 없음, user 유지)
      *   SIGNED_OUT      - 로그아웃 (로그인 페이지로 navigate)
+     *
+     * 안전망: GoTrue가 어떤 이유로든 hang하면 8초 후 강제로 로딩 해제.
+     * (세션 손상·네트워크 장애 등으로 INITIAL_SESSION이 발화되지 않는 경우 대비)
      */
+    const fallbackTimer = setTimeout(() => {
+      console.warn('[Auth] INITIAL_SESSION 타임아웃 — 강제 로딩 해제');
+      setLoading(false);
+    }, 8000);
+
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
+      clearTimeout(fallbackTimer); // 정상 이벤트 수신 시 타임아웃 취소
+
       if (event === 'INITIAL_SESSION') {
         // 기존 세션 복원: 현재 페이지 유지 (navigate 없음)
         if (session) {
@@ -105,7 +114,10 @@ function AppContent() {
       // TOKEN_REFRESHED, USER_UPDATED: user 상태 그대로 유지, navigate 없음
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      clearTimeout(fallbackTimer);
+      subscription.unsubscribe();
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loading) {
