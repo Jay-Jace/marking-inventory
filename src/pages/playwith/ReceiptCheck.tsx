@@ -10,6 +10,7 @@ interface ReceiptItem {
   barcode: string | null;
   expectedQty: number;
   actualQty: number;
+  isMarking: boolean;
 }
 
 interface PendingOrder {
@@ -93,7 +94,7 @@ export default function ReceiptCheck() {
       if (isStale()) return;
 
       // 단품 단위로 집계
-      const componentMap: Record<string, { skuId: string; skuName: string; barcode: string | null; qty: number }> = {};
+      const componentMap: Record<string, { skuId: string; skuName: string; barcode: string | null; qty: number; isMarking: boolean }> = {};
 
       for (const line of (lines || []) as any[]) {
         if (line.needs_marking) {
@@ -106,17 +107,26 @@ export default function ReceiptCheck() {
                 skuName: bom.component?.sku_name || '',
                 barcode: bom.component?.barcode || null,
                 qty: 0,
+                isMarking:
+                  bom.component_sku_id?.includes('MK') ||
+                  bom.component?.sku_name?.includes('마킹') ||
+                  false,
               };
             }
             componentMap[key].qty += bom.quantity * line.sent_qty;
           }
         } else {
-          componentMap[line.finished_sku_id] = {
-            skuId: line.finished_sku_id,
-            skuName: line.finished_sku?.sku_name || line.finished_sku_id,
-            barcode: line.finished_sku?.barcode || null,
-            qty: line.sent_qty,
-          };
+          const key = line.finished_sku_id;
+          if (!componentMap[key]) {
+            componentMap[key] = {
+              skuId: line.finished_sku_id,
+              skuName: line.finished_sku?.sku_name || line.finished_sku_id,
+              barcode: line.finished_sku?.barcode || null,
+              qty: 0,
+              isMarking: false,
+            };
+          }
+          componentMap[key].qty += line.sent_qty;
         }
       }
 
@@ -127,6 +137,7 @@ export default function ReceiptCheck() {
           barcode: c.barcode,
           expectedQty: c.qty,
           actualQty: c.qty,
+          isMarking: c.isMarking,
         }))
       );
     } catch (e: any) {
@@ -288,9 +299,12 @@ export default function ReceiptCheck() {
   }
 
   const hasDiscrepancy = items.some((item) => item.actualQty !== item.expectedQty);
+  const totalUniformQty = items.filter((i) => !i.isMarking).reduce((s, i) => s + i.expectedQty, 0);
+  const totalMarkingQty = items.filter((i) => i.isMarking).reduce((s, i) => s + i.expectedQty, 0);
+  const totalReceiptQty = totalUniformQty + totalMarkingQty;
 
   return (
-    <div className="space-y-5 max-w-lg">
+    <div className="space-y-5 max-w-3xl">
       {/* 에러 */}
       {error && (
         <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
@@ -412,53 +426,138 @@ export default function ReceiptCheck() {
         </div>
       )}
 
-      {/* 품목 카드 */}
+      {/* 품목 카드 — 유니폼/마킹 좌우 2컬럼 */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-50">
           <h3 className="font-medium text-gray-900">📬 입고 확인 — {selectedOrder?.download_date}</h3>
           <p className="text-xs text-gray-400 mt-0.5">실제 입고된 수량을 입력하세요</p>
         </div>
 
-        <div className="divide-y divide-gray-50">
-          {items.map((item) => (
-            <div key={item.skuId} className="px-5 py-3.5 flex items-center gap-4">
-              <div className="flex-1">
-                <p className="text-sm font-medium text-gray-900">{item.skuName}</p>
-                <p className="text-xs text-gray-400 mt-0.5">예정 {item.expectedQty}개</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="flex flex-col items-end gap-0.5">
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      type="number"
-                      min="0"
-                      value={item.actualQty}
-                      onChange={(e) => handleActualChange(item.skuId, Number(e.target.value))}
-                      className={`w-20 border rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                        item.actualQty > item.expectedQty
-                          ? 'border-orange-300 bg-orange-50'
-                          : item.actualQty < item.expectedQty
-                          ? 'border-red-300 bg-red-50'
-                          : 'border-gray-300'
-                      }`}
-                    />
-                    <span className="text-sm text-gray-500">개</span>
+        {/* 총 수량 합계 */}
+        <div className="px-5 py-3 bg-blue-50/60 border-b border-gray-100 space-y-1">
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-blue-700">👕 유니폼 소계</span>
+            <span className="font-semibold text-blue-800">{totalUniformQty}개</span>
+          </div>
+          <div className="flex items-center justify-between text-sm">
+            <span className="text-purple-700">🎨 마킹 소계</span>
+            <span className="font-semibold text-purple-800">{totalMarkingQty}개</span>
+          </div>
+          <div className="border-t border-blue-200 pt-1 mt-1 flex items-center justify-between text-sm">
+            <span className="font-bold text-gray-800">📬 총 입고 수량</span>
+            <span className="font-bold text-gray-900 text-base">{totalReceiptQty}개</span>
+          </div>
+        </div>
+
+        {/* 2컬럼 헤더 */}
+        <div className="grid grid-cols-2 border-b border-gray-100">
+          <div className="px-4 py-2.5 border-r border-gray-100 bg-blue-50">
+            <p className="text-xs font-semibold text-blue-700">
+              👕 유니폼 단품{' '}
+              <span className="font-normal text-blue-500">
+                ({items.filter((i) => !i.isMarking).length}종)
+              </span>
+            </p>
+          </div>
+          <div className="px-4 py-2.5 bg-purple-50">
+            <p className="text-xs font-semibold text-purple-700">
+              🎨 마킹 단품{' '}
+              <span className="font-normal text-purple-500">
+                ({items.filter((i) => i.isMarking).length}종)
+              </span>
+            </p>
+          </div>
+        </div>
+
+        {/* 2컬럼 아이템 목록 */}
+        <div className="grid grid-cols-2">
+          {/* 왼쪽: 유니폼 */}
+          <div className="border-r border-gray-100 divide-y divide-gray-50">
+            {items
+              .filter((item) => !item.isMarking)
+              .map((item) => (
+                <div key={item.skuId} className="px-3 py-3">
+                  <p className="text-xs font-medium text-gray-800 leading-tight truncate">{item.skuName}</p>
+                  <p className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">{item.skuId}</p>
+                  <div className="flex items-center justify-between mt-1.5 gap-1">
+                    <p className="text-[10px] text-gray-400">예정 {item.expectedQty}개</p>
+                    <div className="flex flex-col items-end gap-0.5">
+                      <div className="flex items-center gap-0.5">
+                        <input
+                          type="number"
+                          min="0"
+                          value={item.actualQty}
+                          onChange={(e) => handleActualChange(item.skuId, Number(e.target.value))}
+                          className={`w-16 border rounded-lg px-1.5 py-1 text-xs text-right focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                            item.actualQty > item.expectedQty
+                              ? 'border-orange-300 bg-orange-50'
+                              : item.actualQty < item.expectedQty
+                              ? 'border-red-300 bg-red-50'
+                              : 'border-gray-300'
+                          }`}
+                        />
+                        <span className="text-[10px] text-gray-400">개</span>
+                      </div>
+                      {item.actualQty !== item.expectedQty && (
+                        <span
+                          className={`text-[10px] font-medium ${
+                            item.actualQty > item.expectedQty ? 'text-orange-600' : 'text-red-600'
+                          }`}
+                        >
+                          {item.actualQty > item.expectedQty
+                            ? `+${item.actualQty - item.expectedQty}`
+                            : `${item.actualQty - item.expectedQty}`}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  {item.actualQty !== item.expectedQty && (
-                    <span
-                      className={`text-xs font-medium ${
-                        item.actualQty > item.expectedQty ? 'text-orange-600' : 'text-red-600'
-                      }`}
-                    >
-                      {item.actualQty > item.expectedQty
-                        ? `+${item.actualQty - item.expectedQty}`
-                        : `${item.actualQty - item.expectedQty}`}
-                    </span>
-                  )}
                 </div>
-              </div>
-            </div>
-          ))}
+              ))}
+          </div>
+
+          {/* 오른쪽: 마킹 */}
+          <div className="divide-y divide-gray-50">
+            {items
+              .filter((item) => item.isMarking)
+              .map((item) => (
+                <div key={item.skuId} className="px-3 py-3">
+                  <p className="text-xs font-medium text-gray-800 leading-tight truncate">{item.skuName}</p>
+                  <p className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">{item.skuId}</p>
+                  <div className="flex items-center justify-between mt-1.5 gap-1">
+                    <p className="text-[10px] text-gray-400">예정 {item.expectedQty}개</p>
+                    <div className="flex flex-col items-end gap-0.5">
+                      <div className="flex items-center gap-0.5">
+                        <input
+                          type="number"
+                          min="0"
+                          value={item.actualQty}
+                          onChange={(e) => handleActualChange(item.skuId, Number(e.target.value))}
+                          className={`w-16 border rounded-lg px-1.5 py-1 text-xs text-right focus:outline-none focus:ring-2 focus:ring-purple-500 ${
+                            item.actualQty > item.expectedQty
+                              ? 'border-orange-300 bg-orange-50'
+                              : item.actualQty < item.expectedQty
+                              ? 'border-red-300 bg-red-50'
+                              : 'border-gray-300'
+                          }`}
+                        />
+                        <span className="text-[10px] text-gray-400">개</span>
+                      </div>
+                      {item.actualQty !== item.expectedQty && (
+                        <span
+                          className={`text-[10px] font-medium ${
+                            item.actualQty > item.expectedQty ? 'text-orange-600' : 'text-red-600'
+                          }`}
+                        >
+                          {item.actualQty > item.expectedQty
+                            ? `+${item.actualQty - item.expectedQty}`
+                            : `${item.actualQty - item.expectedQty}`}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+          </div>
         </div>
       </div>
 
