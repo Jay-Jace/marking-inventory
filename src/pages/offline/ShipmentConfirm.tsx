@@ -283,19 +283,10 @@ export default function ShipmentConfirm() {
         const line = lineList[i];
         setConfirmProgress({ current: step, total: totalSteps, step: `라인 처리 중... (${i + 1} / ${lineList.length})` });
 
-        let lineSentQty: number;
-        if (!line.needs_marking) {
-          lineSentQty = sentMap[line.finished_sku_id] ?? line.ordered_qty;
-        } else {
-          const boms = (bomData || []).filter((b: any) => b.finished_sku_id === line.finished_sku_id);
-          if (boms.length > 0) {
-            lineSentQty = Math.min(
-              ...boms.map((b: any) => Math.floor((sentMap[b.component_sku_id] || 0) / b.quantity))
-            );
-          } else {
-            lineSentQty = line.ordered_qty;
-          }
-        }
+        // sent_qty = 주문 세트 수 (ordered_qty)
+        // sentMap은 BOM 전개된 전체 합산값이므로 per-line 역산 시
+        // 공유 컴포넌트로 인해 과다 계산됨 → ordered_qty 사용
+        const lineSentQty = line.ordered_qty;
 
         await supabase
           .from('work_order_line')

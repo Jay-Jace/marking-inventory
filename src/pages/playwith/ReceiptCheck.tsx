@@ -237,15 +237,10 @@ export default function ReceiptCheck() {
       for (let i = 0; i < lineList.length; i++) {
         const line = lineList[i];
         setSaveProgress({ current: i + 1, total: lineList.length + 1, step: `입고 수량 처리 중... (${i + 1} / ${lineList.length})` });
-        let receivedQty = line.ordered_qty;
-        if (line.needs_marking) {
-          const boms = (bomData || []).filter((b: any) => b.finished_sku_id === line.finished_sku_id);
-          if (boms.length > 0) {
-            receivedQty = Math.min(
-              ...boms.map((b: any) => Math.floor((actualMap[b.component_sku_id] || 0) / b.quantity))
-            );
-          }
-        }
+        // received_qty = 주문 세트 수 (ordered_qty)
+        // actualMap은 BOM 전개된 전체 합산값이므로 per-line 역산 시
+        // 공유 컴포넌트로 인해 과다 계산됨 → ordered_qty 사용
+        const receivedQty = line.ordered_qty;
         const { error: updateErr } = await supabase
           .from('work_order_line')
           .update({ received_qty: receivedQty })
