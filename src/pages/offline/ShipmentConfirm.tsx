@@ -150,14 +150,17 @@ export default function ShipmentConfirm() {
           }
         } else {
           const key = line.finished_sku_id;
-          componentMap[key] = {
-            lineId: line.id,
-            skuId: line.finished_sku_id,
-            skuName: line.finished_sku?.sku_name || line.finished_sku_id,
-            barcode: line.finished_sku?.barcode || null,
-            needed: line.ordered_qty,
-            isMarking: false,
-          };
+          if (!componentMap[key]) {
+            componentMap[key] = {
+              lineId: line.id,
+              skuId: line.finished_sku_id,
+              skuName: line.finished_sku?.sku_name || line.finished_sku_id,
+              barcode: line.finished_sku?.barcode || null,
+              needed: 0,
+              isMarking: false,
+            };
+          }
+          componentMap[key].needed += line.ordered_qty;
         }
       }
 
