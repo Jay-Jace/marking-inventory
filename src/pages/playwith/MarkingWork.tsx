@@ -48,6 +48,10 @@ interface HistoryItem {
   needsMarking: boolean;
 }
 
+// ── 타입 ────────────────────────────────────────
+
+type FilterTab = 'all' | 'marking' | 'shipping';
+
 // ── 컴포넌트 ────────────────────────────────────
 
 export default function MarkingWork() {
@@ -60,6 +64,9 @@ export default function MarkingWork() {
   const [saveProgress, setSaveProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // 탭 필터
+  const [activeTab, setActiveTab] = useState<FilterTab>('all');
 
   // 엑셀 관련
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -109,6 +116,7 @@ export default function MarkingWork() {
 
   const selectOrder = async (wo: ActiveOrder) => {
     setSelectedOrder(wo);
+    setActiveTab('all');
     setLoading(true);
     setSaved(false);
     setError(null);
@@ -243,14 +251,15 @@ export default function MarkingWork() {
   // ── 엑셀 양식 다운로드 ──
 
   const handleDownloadTemplate = () => {
+    const tabLabel = activeTab === 'marking' ? '마킹' : activeTab === 'shipping' ? '출고' : '전체';
     generateTemplate(
-      items.map((item) => ({
+      filteredItems.map((item) => ({
         skuId: item.finishedSkuId,
         skuName: item.skuName,
         barcode: item.barcode,
         qty: item.remainingQty,
       })),
-      `마킹작업_${selectedOrder?.download_date || '양식'}.xlsx`
+      `마킹작업_${tabLabel}_${selectedOrder?.download_date || '양식'}.xlsx`
     );
   };
 
@@ -301,13 +310,23 @@ export default function MarkingWork() {
     }
   };
 
-  // ── 집계 ──
+  // ── 탭별 필터링 + 집계 ──
 
-  const carryOverItems = items.filter((i) => i.isCarryOver);
-  const todayNewItems = items.filter((i) => !i.isCarryOver);
-  const totalRemaining = items.reduce((s, i) => s + i.remainingQty, 0);
-  const totalToday = items.reduce((s, i) => s + i.todayQty, 0);
-  const allComplete = items.every((item) => item.todayQty >= item.remainingQty);
+  const markingCount = items.filter((i) => i.needsMarking).length;
+  const shippingCount = items.filter((i) => !i.needsMarking).length;
+
+  const filteredItems = items.filter((i) => {
+    if (activeTab === 'marking') return i.needsMarking;
+    if (activeTab === 'shipping') return !i.needsMarking;
+    return true;
+  });
+
+  const carryOverItems = filteredItems.filter((i) => i.isCarryOver);
+  const todayNewItems = filteredItems.filter((i) => !i.isCarryOver);
+  const totalRemaining = filteredItems.reduce((s, i) => s + i.remainingQty, 0);
+  const totalToday = filteredItems.reduce((s, i) => s + i.todayQty, 0);
+  const allComplete = filteredItems.every((item) => item.todayQty >= item.remainingQty);
+  const totalTodayAll = items.reduce((s, i) => s + i.todayQty, 0);
 
   // ── 저장 ──
 
@@ -534,6 +553,34 @@ export default function MarkingWork() {
         </div>
       </div>
 
+      {/* 탭 필터 */}
+      <div className="flex rounded-xl overflow-hidden border border-gray-200 bg-white shadow-sm">
+        <button
+          onClick={() => setActiveTab('all')}
+          className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
+            activeTab === 'all' ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-50'
+          }`}
+        >
+          전체 ({items.length})
+        </button>
+        <button
+          onClick={() => setActiveTab('marking')}
+          className={`flex-1 py-2.5 text-sm font-medium transition-colors border-x border-gray-200 ${
+            activeTab === 'marking' ? 'bg-purple-600 text-white border-purple-600' : 'text-gray-500 hover:bg-gray-50'
+          }`}
+        >
+          마킹 ({markingCount})
+        </button>
+        <button
+          onClick={() => setActiveTab('shipping')}
+          className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
+            activeTab === 'shipping' ? 'bg-emerald-600 text-white' : 'text-gray-500 hover:bg-gray-50'
+          }`}
+        >
+          출고 ({shippingCount})
+        </button>
+      </div>
+
       {/* ── 이력 조회 모드 (과거 날짜) ── */}
       {!isToday && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
@@ -544,16 +591,22 @@ export default function MarkingWork() {
             <p className="text-xs text-gray-400 mt-0.5">읽기 전용 — 수정은 오늘 날짜에서만 가능</p>
           </div>
 
-          {historyLoading ? (
+          {(() => {
+            const filteredHistory = historyItems.filter((h) => {
+              if (activeTab === 'marking') return h.needsMarking;
+              if (activeTab === 'shipping') return !h.needsMarking;
+              return true;
+            });
+            return historyLoading ? (
             <div className="px-5 py-8 text-center text-gray-400 text-sm">불러오는 중...</div>
-          ) : historyItems.length === 0 ? (
+          ) : filteredHistory.length === 0 ? (
             <div className="px-5 py-8 text-center text-gray-400 text-sm">
               이 날짜에 기록된 작업이 없습니다
             </div>
           ) : (
             <>
               <div className="divide-y divide-gray-50">
-                {historyItems.map((h) => (
+                {filteredHistory.map((h) => (
                   <div key={h.lineId} className="px-5 py-3.5 flex items-center gap-3">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
@@ -578,11 +631,12 @@ export default function MarkingWork() {
               <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
                 <p className="text-sm text-gray-600">이 날 총 완료:</p>
                 <p className="text-sm font-bold text-gray-900">
-                  {historyItems.reduce((s, h) => s + h.completedQty, 0)}개
+                  {filteredHistory.reduce((s, h) => s + h.completedQty, 0)}개
                 </p>
               </div>
             </>
-          )}
+          );
+          })()}
 
           <div className="px-5 py-3 bg-blue-50 border-t border-blue-100 text-center">
             <button
@@ -603,7 +657,7 @@ export default function MarkingWork() {
             <p className="font-semibold text-green-900">오늘 작업이 저장되었습니다</p>
           </div>
           <p className="text-sm text-green-700">
-            총 <strong>{totalToday}개</strong> 완료. 관리자 화면에서 STEP 3 양식을 다운로드하세요.
+            총 <strong>{totalTodayAll}개</strong> 완료. 관리자 화면에서 STEP 3 양식을 다운로드하세요.
           </p>
           {!allComplete && (
             <p className="text-sm text-yellow-700 mt-2 flex items-center gap-1">
@@ -710,6 +764,18 @@ export default function MarkingWork() {
                 <span className="text-blue-600">신규:</span>
                 <span className="font-semibold text-gray-900">{todayNewItems.length}건 {todayNewItems.reduce((s, i) => s + i.remainingQty, 0)}개</span>
               </div>
+              {activeTab === 'all' && (
+                <>
+                  <div className="flex justify-between">
+                    <span className="text-purple-600">마킹:</span>
+                    <span className="font-semibold text-gray-900">{markingCount}건</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-emerald-600">출고:</span>
+                    <span className="font-semibold text-gray-900">{shippingCount}건</span>
+                  </div>
+                </>
+              )}
               <div className="flex justify-between">
                 <span className="text-gray-500">총 잔여:</span>
                 <span className="font-semibold text-gray-900">{totalRemaining}개</span>
@@ -723,7 +789,7 @@ export default function MarkingWork() {
 
           {/* 작업 목록 카드 */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-            {items.length === 0 ? (
+            {filteredItems.length === 0 ? (
               <div className="px-5 py-8 text-center text-gray-400 text-sm">
                 모든 마킹 작업이 완료되었습니다
               </div>
@@ -760,7 +826,7 @@ export default function MarkingWork() {
               </>
             )}
 
-            {items.length > 0 && (
+            {filteredItems.length > 0 && (
               <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
                 <p className="text-sm text-gray-600">물류센터 발송 합계:</p>
                 <p className="text-sm font-bold text-gray-900">{totalToday}개</p>
@@ -768,7 +834,7 @@ export default function MarkingWork() {
             )}
           </div>
 
-          {items.length > 0 && (
+          {filteredItems.length > 0 && (
             <>
               <p className="text-xs text-center text-gray-400">
                 미완료 수량은 내일 자동으로 남습니다
@@ -794,9 +860,14 @@ export default function MarkingWork() {
                   )}
                 </div>
               )}
+              {activeTab !== 'all' && totalTodayAll > 0 && (
+                <p className="text-xs text-center text-amber-600">
+                  저장 시 전체 {totalTodayAll}개가 함께 저장됩니다
+                </p>
+              )}
               <button
                 onClick={handleSave}
-                disabled={saving || totalToday === 0}
+                disabled={saving || totalTodayAll === 0}
                 className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-60 transition-colors text-base"
               >
                 {saving ? '저장 중...' : '오늘 작업 완료 저장'}
