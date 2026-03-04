@@ -77,9 +77,16 @@ export default function Downloads() {
       .select('*, finished_sku(sku_id, sku_name)')
       .eq('work_order_id', selectedWoId);
 
+    // BOM은 해당 작업지시서의 마킹 라인 SKU ID만 필터링해서 조회
+    // (전체 BOM 조회 시 Supabase 기본 1,000행 제한으로 누락 발생)
+    const markingSkuIds = (lines || [])
+      .filter((l: any) => l.needs_marking)
+      .map((l: any) => l.finished_sku_id);
+
     const { data: bomData } = await supabase
       .from('bom')
-      .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name)');
+      .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name)')
+      .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']);
 
     const offlineWarehouse = warehouses['오프라인샵'];
     const playwithWarehouse = warehouses['플레이위즈'];
@@ -159,9 +166,15 @@ export default function Downloads() {
       .eq('work_order_id', selectedWoId)
       .gt('received_qty', 0);
 
+    // 마킹 라인 SKU ID만 필터링하여 BOM 조회 (1,000행 기본 제한 우회)
+    const markingSkuIds2 = (lines || [])
+      .filter((l: any) => l.needs_marking)
+      .map((l: any) => l.finished_sku_id);
+
     const { data: bomData } = await supabase
       .from('bom')
-      .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name)');
+      .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name)')
+      .in('finished_sku_id', markingSkuIds2.length > 0 ? markingSkuIds2 : ['__none__']);
 
     const playwithWarehouse = warehouses['플레이위즈'];
     const componentMap: Record<string, { skuId: string; skuName: string; qty: number }> = {};
@@ -211,9 +224,17 @@ export default function Downloads() {
       .select('*, line:work_order_line(finished_sku_id, needs_marking, finished_sku(sku_id, sku_name))')
       .eq('line.work_order_id', selectedWoId);
 
+    // 마킹 완료된 라인의 SKU ID만 필터링하여 BOM 조회 (1,000행 기본 제한 우회)
+    const markingSkuIds3 = ((markings || []) as any[])
+      .filter((m) => m.line?.needs_marking && m.completed_qty > 0)
+      .map((m) => m.line.finished_sku_id)
+      .filter(Boolean);
+    const uniqueMarkingSkuIds3 = [...new Set(markingSkuIds3)] as string[];
+
     const { data: bomData } = await supabase
       .from('bom')
-      .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name)');
+      .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name)')
+      .in('finished_sku_id', uniqueMarkingSkuIds3.length > 0 ? uniqueMarkingSkuIds3 : ['__none__']);
 
     const playwithWarehouse = warehouses['플레이위즈'];
     const cjWarehouse = warehouses['CJ창고'];
