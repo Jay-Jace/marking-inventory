@@ -1,21 +1,54 @@
-import { useEffect, useState } from 'react';
+import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
-import { AlertTriangle, CheckCircle, Clock } from 'lucide-react';
+import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
+import {
+  AlertTriangle,
+  CheckCircle,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  Download,
+  FileUp,
+  X,
+} from 'lucide-react';
+
+// ── 인터페이스 ──────────────────────────────────
 
 interface MarkingItem {
   lineId: string;
   finishedSkuId: string;
   skuName: string;
-  remainingQty: number; // 아직 마킹 안 된 수량
-  todayQty: number;     // 오늘 완료할 수량 (입력값)
-  markedQty: number;    // 누적 완료 수량
+  barcode: string | null;
+  remainingQty: number;   // 아직 마킹 안 된 수량
+  todayQty: number;       // 오늘 완료할 수량 (입력값)
+  markedQty: number;      // 누적 완료 수량
+  orderedQty: number;     // 주문 수량
+  needsMarking: boolean;  // BOM 완성품(true) vs 단품(false)
+  isCarryOver: boolean;   // 이월 작업건 여부
 }
 
 interface ActiveOrder {
   id: string;
   download_date: string;
 }
+
+interface ComparisonRow {
+  skuId: string;
+  skuName: string;
+  expected: number;
+  uploaded: number;
+  diff: number;
+}
+
+interface HistoryItem {
+  lineId: string;
+  skuName: string;
+  completedQty: number;
+  needsMarking: boolean;
+}
+
+// ── 컴포넌트 ────────────────────────────────────
 
 export default function MarkingWork() {
   const isStale = useStaleGuard();
@@ -27,11 +60,28 @@ export default function MarkingWork() {
   const [saveProgress, setSaveProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // 엑셀 관련
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadComparison, setUploadComparison] = useState<ComparisonRow[] | null>(null);
+  const [xlsxError, setXlsxError] = useState<string | null>(null);
+
+  // 날짜 관리
   const today = new Date().toISOString().split('T')[0];
+  const [selectedDate, setSelectedDate] = useState(today);
+  const [historyItems, setHistoryItems] = useState<HistoryItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  // 모든 라인 ID (이력 조회용)
+  const [allLineIds, setAllLineIds] = useState<string[]>([]);
+
+  const isToday = selectedDate === today;
 
   useEffect(() => {
     loadOrders();
   }, []);
+
+  // ── 작업지시서 목록 로드 ──
 
   const loadOrders = async () => {
     setLoading(true);
@@ -55,33 +105,51 @@ export default function MarkingWork() {
     }
   };
 
+  // ── 작업지시서 선택 → 전체 라인 로드 ──
+
   const selectOrder = async (wo: ActiveOrder) => {
     setSelectedOrder(wo);
     setLoading(true);
     setSaved(false);
     setError(null);
+    setUploadComparison(null);
+    setXlsxError(null);
+    setSelectedDate(today);
+    setHistoryItems([]);
     try {
-      // 마킹이 필요한 라인만 조회
+      // 전체 라인 조회 (needs_marking 필터 제거)
       const { data: lines, error: linesErr } = await supabase
         .from('work_order_line')
-        .select('id, finished_sku_id, received_qty, marked_qty, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name)')
-        .eq('work_order_id', wo.id)
-        .eq('needs_marking', true);
+        .select('id, finished_sku_id, ordered_qty, received_qty, marked_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
+        .eq('work_order_id', wo.id);
       if (linesErr) throw linesErr;
       if (isStale()) return;
 
-      // 오늘 이미 입력된 마킹 수량 조회
-      const { data: todayMarkings, error: markingErr } = await supabase
-        .from('daily_marking')
-        .select('work_order_line_id, completed_qty')
-        .eq('date', today)
-        .in('work_order_line_id', (lines || []).map((l: any) => l.id));
-      if (markingErr) throw markingErr;
-      if (isStale()) return;
+      const lineIds = ((lines || []) as any[]).map((l: any) => l.id);
+      setAllLineIds(lineIds);
+
+      // 전체 daily_marking 조회 (이월 판별용)
+      let allMarkings: any[] = [];
+      if (lineIds.length > 0) {
+        const { data: markings, error: markingErr } = await supabase
+          .from('daily_marking')
+          .select('work_order_line_id, completed_qty, date')
+          .in('work_order_line_id', lineIds);
+        if (markingErr) throw markingErr;
+        if (isStale()) return;
+        allMarkings = (markings || []) as any[];
+      }
 
       const todayMap: Record<string, number> = {};
-      for (const m of (todayMarkings || []) as any[]) {
-        todayMap[m.work_order_line_id] = m.completed_qty;
+      const hasHistory = new Set<string>();
+
+      for (const m of allMarkings) {
+        if (m.date === today) {
+          todayMap[m.work_order_line_id] = m.completed_qty;
+        }
+        if (m.date < today) {
+          hasHistory.add(m.work_order_line_id);
+        }
       }
 
       const markingItems: MarkingItem[] = ((lines || []) as any[])
@@ -90,10 +158,20 @@ export default function MarkingWork() {
           lineId: line.id,
           finishedSkuId: line.finished_sku_id,
           skuName: line.finished_sku?.sku_name || line.finished_sku_id,
+          barcode: line.finished_sku?.barcode || null,
           remainingQty: line.received_qty - line.marked_qty,
           todayQty: todayMap[line.id] || 0,
           markedQty: line.marked_qty,
+          orderedQty: line.ordered_qty,
+          needsMarking: line.needs_marking,
+          isCarryOver: hasHistory.has(line.id) || (line.marked_qty > 0 && line.marked_qty < line.received_qty),
         }));
+
+      // 정렬: 이월 우선 → 나머지
+      markingItems.sort((a, b) => {
+        if (a.isCarryOver !== b.isCarryOver) return a.isCarryOver ? -1 : 1;
+        return 0;
+      });
 
       setItems(markingItems);
     } catch (e: any) {
@@ -103,6 +181,54 @@ export default function MarkingWork() {
       if (!isStale()) setLoading(false);
     }
   };
+
+  // ── 날짜 이동 ──
+
+  const changeDate = (offset: number) => {
+    const d = new Date(selectedDate);
+    d.setDate(d.getDate() + offset);
+    const newDate = d.toISOString().split('T')[0];
+    // 미래 날짜 방지
+    if (newDate > today) return;
+    setSelectedDate(newDate);
+    if (newDate === today) {
+      // 오늘로 돌아오면 작업 모드
+      setHistoryItems([]);
+    } else {
+      // 과거 날짜 → 이력 조회
+      loadHistory(newDate);
+    }
+  };
+
+  const loadHistory = async (date: string) => {
+    if (allLineIds.length === 0) return;
+    setHistoryLoading(true);
+    try {
+      const { data, error: err } = await supabase
+        .from('daily_marking')
+        .select('work_order_line_id, completed_qty, work_order_line:work_order_line!inner(finished_sku_id, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name))')
+        .eq('date', date)
+        .in('work_order_line_id', allLineIds);
+      if (err) throw err;
+      if (isStale()) return;
+
+      setHistoryItems(
+        ((data || []) as any[]).map((d: any) => ({
+          lineId: d.work_order_line_id,
+          skuName: d.work_order_line?.finished_sku?.sku_name || d.work_order_line?.finished_sku_id || '',
+          completedQty: d.completed_qty,
+          needsMarking: d.work_order_line?.needs_marking ?? true,
+        }))
+      );
+    } catch (e: any) {
+      if (isStale()) return;
+      setError(`이력 조회 실패: ${e.message || '알 수 없는 오류'}`);
+    } finally {
+      if (!isStale()) setHistoryLoading(false);
+    }
+  };
+
+  // ── 수량 변경 ──
 
   const handleQtyChange = (lineId: string, value: number) => {
     setItems((prev) =>
@@ -114,8 +240,76 @@ export default function MarkingWork() {
     );
   };
 
-  const totalToday = items.reduce((sum, item) => sum + item.todayQty, 0);
+  // ── 엑셀 양식 다운로드 ──
+
+  const handleDownloadTemplate = () => {
+    generateTemplate(
+      items.map((item) => ({
+        skuId: item.finishedSkuId,
+        skuName: item.skuName,
+        barcode: item.barcode,
+        qty: item.remainingQty,
+      })),
+      `마킹작업_${selectedOrder?.download_date || '양식'}.xlsx`
+    );
+  };
+
+  // ── 엑셀 업로드 ──
+
+  const handleExcelUpload = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setXlsxError(null);
+    setUploadComparison(null);
+    try {
+      const result = await parseQtyExcel(
+        file,
+        items.map((item) => ({ skuId: item.finishedSkuId, skuName: item.skuName, barcode: item.barcode }))
+      );
+
+      // todayQty 일괄 업데이트
+      const matchMap = new Map(result.matched.map((m) => [m.skuId, m.uploadedQty]));
+      setItems((prev) =>
+        prev.map((item) =>
+          matchMap.has(item.finishedSkuId)
+            ? { ...item, todayQty: Math.min(matchMap.get(item.finishedSkuId)!, item.remainingQty) }
+            : item
+        )
+      );
+
+      // 비교 패널
+      const compRows: ComparisonRow[] = items
+        .map((item) => ({
+          skuId: item.finishedSkuId,
+          skuName: item.skuName,
+          expected: item.remainingQty,
+          uploaded: matchMap.get(item.finishedSkuId) || 0,
+          diff: (matchMap.get(item.finishedSkuId) || 0) - item.remainingQty,
+        }))
+        .filter((r) => r.uploaded > 0 || matchMap.has(r.skuId));
+
+      if (result.unmatched.length > 0) {
+        setXlsxError(`매칭 실패: ${result.unmatched.join(', ')}`);
+      }
+      if (compRows.length > 0) {
+        setUploadComparison(compRows);
+      }
+    } catch (err: any) {
+      setXlsxError(err.message || '엑셀 파싱 실패');
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  // ── 집계 ──
+
+  const carryOverItems = items.filter((i) => i.isCarryOver);
+  const todayNewItems = items.filter((i) => !i.isCarryOver);
+  const totalRemaining = items.reduce((s, i) => s + i.remainingQty, 0);
+  const totalToday = items.reduce((s, i) => s + i.todayQty, 0);
   const allComplete = items.every((item) => item.todayQty >= item.remainingQty);
+
+  // ── 저장 ──
 
   const handleSave = async () => {
     if (!selectedOrder) return;
@@ -141,7 +335,7 @@ export default function MarkingWork() {
         if (existingErr) throw existingErr;
 
         const previousQty = existing?.completed_qty || 0;
-        const diff = item.todayQty - previousQty; // 실제 증가분
+        const diff = item.todayQty - previousQty;
 
         if (existing) {
           const { error: updateErr } = await supabase
@@ -159,7 +353,7 @@ export default function MarkingWork() {
           if (insertErr) throw insertErr;
         }
 
-        // work_order_line marked_qty 업데이트 (DB에서 현재값을 다시 읽어 동시성 문제 방지)
+        // work_order_line marked_qty 업데이트
         const { data: currentLine, error: lineReadErr } = await supabase
           .from('work_order_line')
           .select('marked_qty')
@@ -180,8 +374,7 @@ export default function MarkingWork() {
       const { data: allLines, error: allLinesErr } = await supabase
         .from('work_order_line')
         .select('received_qty, marked_qty')
-        .eq('work_order_id', selectedOrder.id)
-        .eq('needs_marking', true);
+        .eq('work_order_id', selectedOrder.id);
       if (allLinesErr) throw allLinesErr;
 
       const allDone = ((allLines || []) as any[]).every(
@@ -203,6 +396,19 @@ export default function MarkingWork() {
     }
   };
 
+  // ── 날짜 포맷 ──
+
+  const formatDate = (d: string) => {
+    const date = new Date(d + 'T00:00:00');
+    const mm = date.getMonth() + 1;
+    const dd = date.getDate();
+    const dayNames = ['일', '월', '화', '수', '목', '금', '토'];
+    const dayName = dayNames[date.getDay()];
+    return `${mm}월 ${dd}일 (${dayName})`;
+  };
+
+  // ── 로딩 ──
+
   if (loading) {
     return <div className="flex items-center justify-center h-64 text-gray-400">불러오는 중...</div>;
   }
@@ -212,44 +418,185 @@ export default function MarkingWork() {
       <div className="flex items-center justify-center h-64">
         <div className="text-center">
           <CheckCircle size={48} className="mx-auto text-green-500 mb-3" />
-          <p className="text-gray-600 font-medium">오늘 작업할 마킹 물량이 없습니다</p>
+          <p className="text-gray-600 font-medium">작업할 마킹 물량이 없습니다</p>
         </div>
       </div>
     );
   }
 
+  // ── 아이템 행 렌더링 ──
+
+  const renderItemRow = (item: MarkingItem) => {
+    const isComplete = item.todayQty >= item.remainingQty;
+    return (
+      <div
+        key={item.lineId}
+        className={`px-5 py-3.5 flex items-center gap-3 ${isComplete ? 'bg-green-50' : ''}`}
+      >
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <p className="text-sm font-medium text-gray-900 truncate">{item.skuName}</p>
+            <span
+              className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
+                item.needsMarking
+                  ? 'bg-purple-100 text-purple-700'
+                  : 'bg-gray-100 text-gray-600'
+              }`}
+            >
+              {item.needsMarking ? '완성품' : '단품'}
+            </span>
+          </div>
+          <p className="text-xs text-gray-400 mt-0.5">
+            잔여 {item.remainingQty}개
+            {item.markedQty > 0 && ` (누적완료 ${item.markedQty}개)`}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <input
+            type="number"
+            min="0"
+            max={item.remainingQty}
+            value={item.todayQty}
+            onChange={(e) => handleQtyChange(item.lineId, Number(e.target.value))}
+            className={`w-20 border rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+              isComplete ? 'border-green-300 bg-green-50' : 'border-gray-300'
+            }`}
+          />
+          <span className="text-sm text-gray-500">/ {item.remainingQty}개</span>
+          {isComplete && <CheckCircle size={16} className="text-green-500" />}
+        </div>
+      </div>
+    );
+  };
+
+  // ── 렌더링 ──
+
   return (
-    <div className="space-y-5 max-w-lg">
+    <div className="space-y-5 max-w-3xl">
+      {/* 에러 */}
       {error && (
         <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
           <AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" />
           <div>
             <p className="text-sm text-red-800">{error}</p>
-            <button onClick={loadOrders} className="text-xs text-red-600 underline mt-1">다시 시도</button>
+            <button onClick={loadOrders} className="text-xs text-red-600 underline mt-1">
+              다시 시도
+            </button>
           </div>
         </div>
       )}
+
+      {/* 헤더 */}
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-900">마킹 작업</h2>
-        <span className="text-sm text-gray-500">{today}</span>
+        {orders.length > 1 && (
+          <select
+            className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            value={selectedOrder?.id}
+            onChange={(e) => {
+              const wo = orders.find((w) => w.id === e.target.value);
+              if (wo) selectOrder(wo);
+            }}
+          >
+            {orders.map((wo) => (
+              <option key={wo.id} value={wo.id}>
+                {wo.download_date}
+              </option>
+            ))}
+          </select>
+        )}
       </div>
 
-      {orders.length > 1 && (
-        <select
-          className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          value={selectedOrder?.id}
-          onChange={(e) => {
-            const wo = orders.find((w) => w.id === e.target.value);
-            if (wo) selectOrder(wo);
-          }}
-        >
-          {orders.map((wo) => (
-            <option key={wo.id} value={wo.id}>{wo.download_date}</option>
-          ))}
-        </select>
+      {/* 날짜 네비게이션 */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-4 py-3">
+        <div className="flex items-center justify-between">
+          <button
+            onClick={() => changeDate(-1)}
+            className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-500"
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <div className="text-center">
+            <p className="text-sm font-semibold text-gray-900">{formatDate(selectedDate)}</p>
+            {isToday ? (
+              <span className="text-xs text-blue-600 font-medium">오늘 — 작업 모드</span>
+            ) : (
+              <span className="text-xs text-gray-400">이력 조회 (읽기 전용)</span>
+            )}
+          </div>
+          <button
+            onClick={() => changeDate(1)}
+            disabled={isToday}
+            className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-500 disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            <ChevronRight size={18} />
+          </button>
+        </div>
+      </div>
+
+      {/* ── 이력 조회 모드 (과거 날짜) ── */}
+      {!isToday && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-100 bg-gray-50">
+            <h3 className="font-medium text-gray-700">
+              {formatDate(selectedDate)} 작업 이력
+            </h3>
+            <p className="text-xs text-gray-400 mt-0.5">읽기 전용 — 수정은 오늘 날짜에서만 가능</p>
+          </div>
+
+          {historyLoading ? (
+            <div className="px-5 py-8 text-center text-gray-400 text-sm">불러오는 중...</div>
+          ) : historyItems.length === 0 ? (
+            <div className="px-5 py-8 text-center text-gray-400 text-sm">
+              이 날짜에 기록된 작업이 없습니다
+            </div>
+          ) : (
+            <>
+              <div className="divide-y divide-gray-50">
+                {historyItems.map((h) => (
+                  <div key={h.lineId} className="px-5 py-3.5 flex items-center gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium text-gray-900 truncate">{h.skuName}</p>
+                        <span
+                          className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
+                            h.needsMarking
+                              ? 'bg-purple-100 text-purple-700'
+                              : 'bg-gray-100 text-gray-600'
+                          }`}
+                        >
+                          {h.needsMarking ? '완성품' : '단품'}
+                        </span>
+                      </div>
+                    </div>
+                    <p className="text-sm font-semibold text-gray-700 flex-shrink-0">
+                      {h.completedQty}개 완료
+                    </p>
+                  </div>
+                ))}
+              </div>
+              <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
+                <p className="text-sm text-gray-600">이 날 총 완료:</p>
+                <p className="text-sm font-bold text-gray-900">
+                  {historyItems.reduce((s, h) => s + h.completedQty, 0)}개
+                </p>
+              </div>
+            </>
+          )}
+
+          <div className="px-5 py-3 bg-blue-50 border-t border-blue-100 text-center">
+            <button
+              onClick={() => { setSelectedDate(today); setHistoryItems([]); }}
+              className="text-sm text-blue-600 font-medium hover:underline"
+            >
+              오늘 작업으로 돌아가기
+            </button>
+          </div>
+        </div>
       )}
 
-      {saved ? (
+      {/* ── 오늘 작업 모드 ── */}
+      {isToday && saved ? (
         <div className="bg-green-50 border border-green-200 rounded-xl p-5">
           <div className="flex items-center gap-3 mb-2">
             <CheckCircle size={24} className="text-green-600" />
@@ -271,56 +618,151 @@ export default function MarkingWork() {
             수량 수정하기
           </button>
         </div>
-      ) : (
+      ) : isToday && (
         <>
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-            <div className="px-5 py-4 border-b border-gray-50">
-              <h3 className="font-medium text-gray-900">🔨 오늘 작업 목록</h3>
-              <p className="text-xs text-gray-400 mt-0.5">완료된 수량을 입력하세요 (미완료분은 내일 이월)</p>
-            </div>
+          {/* 엑셀 버튼 */}
+          <div className="flex gap-2">
+            <button
+              onClick={handleDownloadTemplate}
+              className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
+            >
+              <Download size={15} />
+              양식 다운로드
+            </button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="flex items-center gap-1.5 px-3 py-2 text-sm border border-blue-300 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors"
+            >
+              <FileUp size={15} />
+              엑셀 업로드
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              className="hidden"
+              onChange={handleExcelUpload}
+            />
+          </div>
 
+          {/* 엑셀 파싱 에러 */}
+          {xlsxError && (
+            <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
+              <AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" />
+              <p className="text-sm text-red-800">{xlsxError}</p>
+            </div>
+          )}
+
+          {/* 업로드 비교 패널 */}
+          {uploadComparison && (
+            <div className="bg-white rounded-xl shadow-sm border border-blue-100 overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-50 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium text-gray-900">업로드 비교 결과</p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    {uploadComparison.length}개 품목 수량 적용됨
+                  </p>
+                </div>
+                <button
+                  onClick={() => setUploadComparison(null)}
+                  className="text-gray-400 hover:text-gray-600 transition-colors p-1"
+                >
+                  <X size={15} />
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 text-gray-500 text-xs">
+                      <th className="px-4 py-2 text-left font-medium">SKU명</th>
+                      <th className="px-4 py-2 text-right font-medium">잔여</th>
+                      <th className="px-4 py-2 text-right font-medium">업로드</th>
+                      <th className="px-4 py-2 text-right font-medium">차이</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {uploadComparison.map((row) => (
+                      <tr key={row.skuId}>
+                        <td className="px-4 py-2 text-gray-900 truncate max-w-[200px]">{row.skuName}</td>
+                        <td className="px-4 py-2 text-right text-gray-500">{row.expected}</td>
+                        <td className="px-4 py-2 text-right text-gray-900 font-medium">{row.uploaded}</td>
+                        <td className={`px-4 py-2 text-right font-medium ${
+                          row.diff === 0 ? 'text-green-600' : row.diff < 0 ? 'text-red-600' : 'text-orange-600'
+                        }`}>
+                          {row.diff > 0 ? `+${row.diff}` : row.diff}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* 총 수량 합계 */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-5 py-3">
+            <div className="grid grid-cols-2 gap-4 text-sm">
+              <div className="flex justify-between">
+                <span className="text-orange-600">이월:</span>
+                <span className="font-semibold text-gray-900">{carryOverItems.length}건 {carryOverItems.reduce((s, i) => s + i.remainingQty, 0)}개</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-blue-600">신규:</span>
+                <span className="font-semibold text-gray-900">{todayNewItems.length}건 {todayNewItems.reduce((s, i) => s + i.remainingQty, 0)}개</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">총 잔여:</span>
+                <span className="font-semibold text-gray-900">{totalRemaining}개</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-500">오늘 입력:</span>
+                <span className="font-bold text-blue-700">{totalToday}개</span>
+              </div>
+            </div>
+          </div>
+
+          {/* 작업 목록 카드 */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
             {items.length === 0 ? (
               <div className="px-5 py-8 text-center text-gray-400 text-sm">
                 모든 마킹 작업이 완료되었습니다
               </div>
             ) : (
-              <div className="divide-y divide-gray-50">
-                {items.map((item) => {
-                  const isComplete = item.todayQty >= item.remainingQty;
-                  return (
-                    <div key={item.lineId} className={`px-5 py-3.5 flex items-center gap-3 ${isComplete ? 'bg-green-50' : ''}`}>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-900 truncate">{item.skuName}</p>
-                        <p className="text-xs text-gray-400 mt-0.5">
-                          잔여 {item.remainingQty}개
-                          {item.markedQty > 0 && ` (누적완료 ${item.markedQty}개)`}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        <input
-                          type="number"
-                          min="0"
-                          max={item.remainingQty}
-                          value={item.todayQty}
-                          onChange={(e) => handleQtyChange(item.lineId, Number(e.target.value))}
-                          className={`w-20 border rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                            isComplete ? 'border-green-300 bg-green-50' : 'border-gray-300'
-                          }`}
-                        />
-                        <span className="text-sm text-gray-500">/ {item.remainingQty}개</span>
-                        {isComplete && <CheckCircle size={16} className="text-green-500" />}
-                      </div>
+              <>
+                {/* 이월 작업건 (상단, 주황 배경) */}
+                {carryOverItems.length > 0 && (
+                  <div>
+                    <div className="px-4 py-2.5 bg-orange-50 border-b border-orange-200 flex items-center gap-2">
+                      <AlertTriangle size={14} className="text-orange-600" />
+                      <span className="text-sm font-medium text-orange-800">
+                        이월 작업 ({carryOverItems.length}건) — 우선 처리
+                      </span>
                     </div>
-                  );
-                })}
-              </div>
+                    <div className="divide-y divide-gray-50">
+                      {carryOverItems.map(renderItemRow)}
+                    </div>
+                  </div>
+                )}
+
+                {/* 오늘 신규 작업건 */}
+                {todayNewItems.length > 0 && (
+                  <div>
+                    <div className="px-4 py-2.5 bg-blue-50 border-b border-blue-200 flex items-center gap-2">
+                      <span className="text-sm font-medium text-blue-800">
+                        {carryOverItems.length > 0 ? '오늘 작업' : '작업 목록'} ({todayNewItems.length}건)
+                      </span>
+                    </div>
+                    <div className="divide-y divide-gray-50">
+                      {todayNewItems.map(renderItemRow)}
+                    </div>
+                  </div>
+                )}
+              </>
             )}
 
             {items.length > 0 && (
               <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
-                <p className="text-sm text-gray-600">
-                  물류센터 발송 합계:
-                </p>
+                <p className="text-sm text-gray-600">물류센터 발송 합계:</p>
                 <p className="text-sm font-bold text-gray-900">{totalToday}개</p>
               </div>
             )}
