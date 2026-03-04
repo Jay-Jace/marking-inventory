@@ -1,5 +1,6 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { AlertTriangle, CheckCircle, Download, FileUp, Truck, X } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 
@@ -29,6 +30,7 @@ interface ComparisonRow {
 }
 
 export default function ShipmentConfirm() {
+  const isStale = useStaleGuard();
   const [workOrders, setWorkOrders] = useState<ActiveWorkOrder[]>([]);
   const [selectedWo, setSelectedWo] = useState<ActiveWorkOrder | null>(null);
   const [items, setItems] = useState<ShipmentItem[]>([]);
@@ -55,6 +57,7 @@ export default function ShipmentConfirm() {
         .eq('status', '이관준비')
         .order('uploaded_at', { ascending: false });
       if (err) throw err;
+      if (isStale()) return;
       const orders = (data || []) as ActiveWorkOrder[];
       setWorkOrders(orders);
       if (orders.length > 0) {
@@ -63,6 +66,7 @@ export default function ShipmentConfirm() {
         setLoading(false);
       }
     } catch (e: any) {
+      if (isStale()) return;
       setError(`데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
       setLoading(false);
     }
@@ -82,6 +86,7 @@ export default function ShipmentConfirm() {
         .select('id, finished_sku_id, ordered_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
         .eq('work_order_id', wo.id);
       if (linesErr) throw linesErr;
+      if (isStale()) return;
 
       const { data: warehouses, error: warehouseErr } = await supabase
         .from('warehouse')
@@ -89,6 +94,7 @@ export default function ShipmentConfirm() {
         .eq('name', '오프라인샵')
         .maybeSingle();
       if (warehouseErr) throw warehouseErr;
+      if (isStale()) return;
 
       const offlineWarehouseId = (warehouses as any)?.id;
 
@@ -101,6 +107,7 @@ export default function ShipmentConfirm() {
         .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, barcode)')
         .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']);
       if (bomErr) throw bomErr;
+      if (isStale()) return;
 
       // 오프라인샵 재고 조회
       const { data: inventoryData, error: invErr } = await supabase
@@ -108,6 +115,7 @@ export default function ShipmentConfirm() {
         .select('sku_id, quantity')
         .eq('warehouse_id', offlineWarehouseId);
       if (invErr) throw invErr;
+      if (isStale()) return;
 
       const inventoryMap: Record<string, number> = {};
       for (const inv of (inventoryData || []) as any[]) {
@@ -167,9 +175,10 @@ export default function ShipmentConfirm() {
 
       setItems(shipmentItems);
     } catch (e: any) {
+      if (isStale()) return;
       setError(`발주 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   };
 

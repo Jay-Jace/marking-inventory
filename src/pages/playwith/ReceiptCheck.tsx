@@ -1,5 +1,6 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { AlertTriangle, CheckCircle, Download, FileUp, X } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 
@@ -25,6 +26,7 @@ interface ComparisonRow {
 }
 
 export default function ReceiptCheck() {
+  const isStale = useStaleGuard();
   const [orders, setOrders] = useState<PendingOrder[]>([]);
   const [selectedOrder, setSelectedOrder] = useState<PendingOrder | null>(null);
   const [items, setItems] = useState<ReceiptItem[]>([]);
@@ -51,11 +53,13 @@ export default function ReceiptCheck() {
         .eq('status', '이관중')
         .order('uploaded_at', { ascending: false });
       if (err) throw err;
+      if (isStale()) return;
       const list = (data || []) as PendingOrder[];
       setOrders(list);
       if (list.length > 0) selectOrder(list[0]);
       else setLoading(false);
     } catch (e: any) {
+      if (isStale()) return;
       setError(`데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
       setLoading(false);
     }
@@ -75,11 +79,18 @@ export default function ReceiptCheck() {
         .select('finished_sku_id, sent_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
         .eq('work_order_id', wo.id);
       if (linesErr) throw linesErr;
+      if (isStale()) return;
 
+      // BOM — 마킹 대상 finished_sku_id로 필터링 (필터 없으면 1,000행 제한에 걸려 누락 발생)
+      const markingSkuIds = ((lines || []) as any[])
+        .filter((l) => l.needs_marking)
+        .map((l) => l.finished_sku_id as string);
       const { data: bomData, error: bomErr } = await supabase
         .from('bom')
-        .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, barcode)');
+        .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, barcode)')
+        .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']);
       if (bomErr) throw bomErr;
+      if (isStale()) return;
 
       // 단품 단위로 집계
       const componentMap: Record<string, { skuId: string; skuName: string; barcode: string | null; qty: number }> = {};
@@ -119,9 +130,10 @@ export default function ReceiptCheck() {
         }))
       );
     } catch (e: any) {
+      if (isStale()) return;
       setError(`입고 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   };
 
@@ -198,15 +210,19 @@ export default function ReceiptCheck() {
         .eq('work_order_id', selectedOrder.id);
       if (linesErr) throw linesErr;
 
+      const lineList = (lines || []) as any[];
+      const confirmMarkingSkuIds = lineList
+        .filter((l) => l.needs_marking)
+        .map((l) => l.finished_sku_id as string);
       const { data: bomData, error: bomErr } = await supabase
         .from('bom')
-        .select('finished_sku_id, component_sku_id, quantity');
+        .select('finished_sku_id, component_sku_id, quantity')
+        .in('finished_sku_id', confirmMarkingSkuIds.length > 0 ? confirmMarkingSkuIds : ['__none__']);
       if (bomErr) throw bomErr;
 
       const actualMap: Record<string, number> = {};
       for (const item of items) actualMap[item.skuId] = item.actualQty;
 
-      const lineList = (lines || []) as any[];
       for (let i = 0; i < lineList.length; i++) {
         const line = lineList[i];
         setSaveProgress({ current: i + 1, total: lineList.length + 1, step: `입고 수량 처리 중... (${i + 1} / ${lineList.length})` });

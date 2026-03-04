@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { AlertTriangle, CheckCircle, Clock } from 'lucide-react';
 
 interface MarkingItem {
@@ -17,6 +18,7 @@ interface ActiveOrder {
 }
 
 export default function MarkingWork() {
+  const isStale = useStaleGuard();
   const [orders, setOrders] = useState<ActiveOrder[]>([]);
   const [selectedOrder, setSelectedOrder] = useState<ActiveOrder | null>(null);
   const [items, setItems] = useState<MarkingItem[]>([]);
@@ -41,11 +43,13 @@ export default function MarkingWork() {
         .in('status', ['입고확인완료', '마킹중'])
         .order('uploaded_at', { ascending: false });
       if (err) throw err;
+      if (isStale()) return;
       const list = (data || []) as ActiveOrder[];
       setOrders(list);
       if (list.length > 0) selectOrder(list[0]);
       else setLoading(false);
     } catch (e: any) {
+      if (isStale()) return;
       setError(`데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
       setLoading(false);
     }
@@ -64,6 +68,7 @@ export default function MarkingWork() {
         .eq('work_order_id', wo.id)
         .eq('needs_marking', true);
       if (linesErr) throw linesErr;
+      if (isStale()) return;
 
       // 오늘 이미 입력된 마킹 수량 조회
       const { data: todayMarkings, error: markingErr } = await supabase
@@ -72,6 +77,7 @@ export default function MarkingWork() {
         .eq('date', today)
         .in('work_order_line_id', (lines || []).map((l: any) => l.id));
       if (markingErr) throw markingErr;
+      if (isStale()) return;
 
       const todayMap: Record<string, number> = {};
       for (const m of (todayMarkings || []) as any[]) {
@@ -91,9 +97,10 @@ export default function MarkingWork() {
 
       setItems(markingItems);
     } catch (e: any) {
+      if (isStale()) return;
       setError(`마킹 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   };
 
