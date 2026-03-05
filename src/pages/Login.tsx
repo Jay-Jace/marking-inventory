@@ -14,14 +14,26 @@ export default function Login() {
 
     const loginEmail = userId.includes('@') ? userId : `${userId}@marking.internal`;
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email: loginEmail,
-      password,
-    });
-    if (error) {
-      setError('아이디 또는 비밀번호가 올바르지 않습니다.');
+    try {
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('timeout')), 15_000)
+      );
+      const { error: authError } = await Promise.race([
+        supabase.auth.signInWithPassword({ email: loginEmail, password }),
+        timeout,
+      ]);
+      if (authError) {
+        setError('아이디 또는 비밀번호가 올바르지 않습니다.');
+      }
+    } catch (err: any) {
+      setError(
+        err.message === 'timeout'
+          ? '서버 응답이 없습니다. 새로고침 후 다시 시도해주세요.'
+          : '로그인 실패. 잠시 후 다시 시도해주세요.'
+      );
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   return (

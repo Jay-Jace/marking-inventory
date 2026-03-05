@@ -31,8 +31,13 @@ const fetchWithTimeout = (
   );
 };
 
-// lock: no-op 제거 — GoTrue 기본 Web Locks 메커니즘 복원으로 동시 토큰 갱신 방지
-// global.fetch에 타임아웃 래퍼를 주입해 모든 요청이 최대 15초 내 완료되도록 보장
+// lock: no-op — Web Locks API가 일부 브라우저 환경에서 hang을 유발하여
+// onAuthStateChange·signInWithPassword 등이 영원히 대기하는 문제 방지.
+// 동시 토큰 갱신 리스크보다 앱 hang 방지가 우선.
+// global.fetch에 타임아웃 래퍼를 주입해 모든 요청이 최대 15초 내 완료되도록 보장.
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   global: { fetch: fetchWithTimeout },
+  auth: {
+    lock: async (_name: string, _acquireTimeout: number, fn: () => Promise<any>) => fn(),
+  },
 });
