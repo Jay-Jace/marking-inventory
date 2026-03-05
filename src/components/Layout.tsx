@@ -15,6 +15,7 @@ import {
   Eye,
   ShieldCheck,
   Warehouse,
+  Truck,
 } from 'lucide-react';
 
 interface NavItem {
@@ -77,6 +78,12 @@ const navItems: NavItem[] = [
     label: '마킹 작업',
     path: '/playwith/marking',
     icon: <ClipboardList size={18} />,
+    roles: ['playwith'],
+  },
+  {
+    label: '출고 확인',
+    path: '/playwith/shipment',
+    icon: <Truck size={18} />,
     roles: ['playwith'],
   },
 ];

@@ -251,7 +251,7 @@ export default function MarkingWork() {
   // ── 엑셀 양식 다운로드 ──
 
   const handleDownloadTemplate = () => {
-    const tabLabel = activeTab === 'marking' ? '마킹' : activeTab === 'shipping' ? '출고' : '전체';
+    const tabLabel = activeTab === 'marking' ? '마킹' : activeTab === 'shipping' ? '단품' : '전체';
     generateTemplate(
       filteredItems.map((item) => ({
         skuId: item.finishedSkuId,
@@ -577,7 +577,7 @@ export default function MarkingWork() {
             activeTab === 'shipping' ? 'bg-emerald-600 text-white' : 'text-gray-500 hover:bg-gray-50'
           }`}
         >
-          출고 ({shippingCount})
+          단품 ({shippingCount})
         </button>
       </div>
 
@@ -771,7 +771,7 @@ export default function MarkingWork() {
                     <span className="font-semibold text-gray-900">{markingCount}건</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-emerald-600">출고:</span>
+                    <span className="text-emerald-600">단품:</span>
                     <span className="font-semibold text-gray-900">{shippingCount}건</span>
                   </div>
                 </>

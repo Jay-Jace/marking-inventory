@@ -18,6 +18,7 @@ import InventoryUpload from './pages/admin/InventoryUpload';
 import ShipmentConfirm from './pages/offline/ShipmentConfirm';
 import ReceiptCheck from './pages/playwith/ReceiptCheck';
 import MarkingWork from './pages/playwith/MarkingWork';
+import ShipmentOut from './pages/playwith/ShipmentOut';
 import type { UserRole, AppUser } from './types';
 
 function AppContent() {
@@ -167,6 +168,7 @@ function AppContent() {
         {/* 플레이위즈 */}
         <Route path="/playwith/receipt" element={<ReceiptCheck />} />
         <Route path="/playwith/marking" element={<MarkingWork />} />
+        <Route path="/playwith/shipment" element={<ShipmentOut />} />
 
         {/* 기본 리다이렉트 */}
         <Route
