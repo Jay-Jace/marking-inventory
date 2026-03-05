@@ -19,6 +19,7 @@ interface ShipmentOutItem {
 interface ActiveWorkOrder {
   id: string;
   download_date: string;
+  status: string;
 }
 
 export default function ShipmentOut() {
@@ -45,8 +46,8 @@ export default function ShipmentOut() {
     try {
       const { data, error: err } = await supabase
         .from('work_order')
-        .select('id, download_date')
-        .eq('status', '마킹완료')
+        .select('id, download_date, status')
+        .in('status', ['마킹중', '마킹완료'])
         .order('uploaded_at', { ascending: false });
       if (err) throw err;
       if (isStale()) return;
@@ -290,7 +291,7 @@ export default function ShipmentOut() {
         <div className="text-center">
           <CheckCircle size={48} className="mx-auto text-green-500 mb-3" />
           <p className="text-gray-600 font-medium">출고 대기 중인 물량이 없습니다</p>
-          <p className="text-sm text-gray-400 mt-1">마킹 작업이 완료되면 표시됩니다</p>
+          <p className="text-sm text-gray-400 mt-1">입고 확인된 작업지시서가 없습니다</p>
         </div>
       </div>
     );
@@ -308,6 +309,7 @@ export default function ShipmentOut() {
     );
   }
 
+  const isMarkingDone = selectedWo?.status === '마킹완료';
   const hasShortage = items.some((item) => item.isShortage);
   const markingItems = items.filter((i) => i.needsMarking);
   const directItems = items.filter((i) => !i.needsMarking);
@@ -330,7 +332,18 @@ export default function ShipmentOut() {
 
       {/* 헤더 */}
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-xl font-bold text-gray-900">출고 확인</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="text-xl font-bold text-gray-900">출고 확인</h2>
+          {selectedWo && (
+            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+              isMarkingDone
+                ? 'bg-green-100 text-green-700'
+                : 'bg-amber-100 text-amber-700'
+            }`}>
+              {isMarkingDone ? '마킹완료' : '마킹중'}
+            </span>
+          )}
+        </div>
         {workOrders.length > 1 && (
           <select
             className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -342,7 +355,7 @@ export default function ShipmentOut() {
           >
             {workOrders.map((wo) => (
               <option key={wo.id} value={wo.id}>
-                {wo.download_date}
+                {wo.download_date} ({wo.status === '마킹완료' ? '마킹완료' : '마킹중'})
               </option>
             ))}
           </select>
@@ -562,15 +575,21 @@ export default function ShipmentOut() {
 
       <button
         onClick={handleConfirm}
-        disabled={confirming || items.length === 0}
+        disabled={confirming || items.length === 0 || !isMarkingDone}
         className="w-full bg-emerald-600 text-white py-3.5 rounded-xl font-semibold hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 text-base"
       >
         <Truck size={20} />
         {confirming ? '처리 중...' : '출고 완료 확인'}
       </button>
-      <p className="text-xs text-center text-gray-400">
-        버튼 클릭 시 CJ 물류센터로 출고 처리됩니다
-      </p>
+      {!isMarkingDone ? (
+        <p className="text-xs text-center text-amber-600">
+          모든 마킹 작업 완료 후 출고가 가능합니다
+        </p>
+      ) : (
+        <p className="text-xs text-center text-gray-400">
+          버튼 클릭 시 CJ 물류센터로 출고 처리됩니다
+        </p>
+      )}
     </div>
   );
 }

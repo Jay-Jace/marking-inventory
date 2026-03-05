@@ -373,7 +373,9 @@ export default function MarkingWork() {
         .eq('id', selectedOrder.id);
       if (statusErr) throw statusErr;
 
-      setSaved(true);
+      // DB 재조회로 완료 아이템 자동 제거 + 잔여 수량 갱신
+      await selectOrder(selectedOrder);
+      setSaved(true); // selectOrder 내부에서 setSaved(false) 호출되므로 다시 설정
     } catch (e: any) {
       setError(`마킹 저장 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {
