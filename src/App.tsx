@@ -82,19 +82,18 @@ function AppContent() {
      *   TOKEN_REFRESHED - JWT 자동 갱신 (navigate 없음, user 유지)
      *   SIGNED_OUT      - 로그아웃 (로그인 페이지로 navigate)
      *
-     * 안전망: GoTrue가 어떤 이유로든 hang하면 8초 후 강제로 로딩 해제.
-     * (세션 손상·네트워크 장애 등으로 INITIAL_SESSION이 발화되지 않는 경우 대비)
+     * 안전망: GoTrue·loadUserProfile 등이 어떤 이유로든 hang하면
+     * 20초 후 강제로 로딩 해제. (clearTimeout은 cleanup에서만 수행)
+     * 정상 완료 시 setLoading(false)가 먼저 실행되므로 타이머 발화는 no-op.
      */
     const fallbackTimer = setTimeout(() => {
-      console.warn('[Auth] INITIAL_SESSION 타임아웃 — 강제 로딩 해제');
+      console.warn('[Auth] 전체 초기화 타임아웃 (20s) — 강제 로딩 해제');
       setLoading(false);
-    }, 8000);
+    }, 20_000);
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
-      clearTimeout(fallbackTimer); // 정상 이벤트 수신 시 타임아웃 취소
-
       if (event === 'INITIAL_SESSION') {
         // 기존 세션 복원: 현재 페이지 유지 (navigate 없음)
         if (session) {

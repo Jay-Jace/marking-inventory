@@ -106,8 +106,7 @@ export default function MarkingWork() {
       if (list.length > 0) selectOrder(list[0]);
       else setLoading(false);
     } catch (e: any) {
-      if (isStale()) return;
-      setError(`데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
+      if (!isStale()) setError(`데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
       setLoading(false);
     }
   };
@@ -183,10 +182,9 @@ export default function MarkingWork() {
 
       setItems(markingItems);
     } catch (e: any) {
-      if (isStale()) return;
-      setError(`마킹 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
+      if (!isStale()) setError(`마킹 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
-      if (!isStale()) setLoading(false);
+      setLoading(false);
     }
   };
 
@@ -229,10 +227,9 @@ export default function MarkingWork() {
         }))
       );
     } catch (e: any) {
-      if (isStale()) return;
-      setError(`이력 조회 실패: ${e.message || '알 수 없는 오류'}`);
+      if (!isStale()) setError(`이력 조회 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
-      if (!isStale()) setHistoryLoading(false);
+      setHistoryLoading(false);
     }
   };
 

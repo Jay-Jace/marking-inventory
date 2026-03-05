@@ -60,8 +60,7 @@ export default function ReceiptCheck() {
       if (list.length > 0) selectOrder(list[0]);
       else setLoading(false);
     } catch (e: any) {
-      if (isStale()) return;
-      setError(`데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
+      if (!isStale()) setError(`데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
       setLoading(false);
     }
   };
@@ -141,10 +140,9 @@ export default function ReceiptCheck() {
         }))
       );
     } catch (e: any) {
-      if (isStale()) return;
-      setError(`입고 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
+      if (!isStale()) setError(`입고 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
-      if (!isStale()) setLoading(false);
+      setLoading(false);
     }
   };
 

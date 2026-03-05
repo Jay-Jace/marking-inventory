@@ -19,6 +19,7 @@ export default function Dashboard() {
   const [inventories, setInventories] = useState<InventorySummary[]>([]);
   const [activeOrders, setActiveOrders] = useState<ActiveOrder[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
@@ -28,6 +29,7 @@ export default function Dashboard() {
 
   const loadData = async () => {
     setLoading(true);
+    setError(null);
     try {
       // 창고별 재고 요약
       const { data: invData, error: invError } = await supabase
@@ -66,8 +68,9 @@ export default function Dashboard() {
           }))
         );
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('loadData error:', err);
+      setError(`대시보드 데이터 조회 실패: ${err.message || '알 수 없는 오류'}`);
     } finally {
       setLoading(false);
     }
@@ -123,6 +126,17 @@ export default function Dashboard() {
   return (
     <div className="space-y-6">
       <h2 className="text-xl font-bold text-gray-900">대시보드</h2>
+
+      {/* 에러 */}
+      {error && (
+        <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
+          <AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-sm text-red-800">{error}</p>
+            <button onClick={loadData} className="text-xs text-red-600 underline mt-1">다시 시도</button>
+          </div>
+        </div>
+      )}
 
       {/* 창고별 재고 현황 */}
       <div>
