@@ -74,7 +74,7 @@ export default function ShipmentOut() {
       // 1. 작업지시서 라인 조회
       const { data: lines, error: linesErr } = await supabase
         .from('work_order_line')
-        .select('id, finished_sku_id, ordered_qty, marked_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
+        .select('id, finished_sku_id, ordered_qty, received_qty, marked_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
         .eq('work_order_id', wo.id);
       if (linesErr) throw linesErr;
       if (isStale()) return;
@@ -123,7 +123,7 @@ export default function ShipmentOut() {
       for (const line of lineList) {
         const qty = line.needs_marking
           ? (markingTotals[line.id] || 0)     // 마킹 완성품: daily_marking 합산
-          : (line.marked_qty || 0);           // 단품: marked_qty
+          : (line.received_qty || 0);         // 단품: 입고확인 수량 (마킹 불필요)
 
         if (qty <= 0) continue;
 
@@ -508,7 +508,7 @@ export default function ShipmentOut() {
                   <p className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">{item.finishedSkuId}</p>
                   <div className="flex items-center justify-between mt-1.5 gap-1">
                     <div>
-                      <p className="text-[10px] text-gray-400">작업완료 {item.availableQty}</p>
+                      <p className="text-[10px] text-gray-400">입고확인 {item.availableQty}</p>
                       {item.isShortage ? (
                         <p className="text-[10px] text-red-500">재고 {item.inventoryQty}</p>
                       ) : (
