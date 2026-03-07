@@ -161,6 +161,21 @@ export default function UserManage({ currentUserId }: Props) {
 
       if (profileError) throw profileError;
 
+      // 활동 이력 기록
+      await supabase.from('activity_log').insert({
+        user_id: currentUserId,
+        action_type: 'user_create',
+        work_order_id: null,
+        action_date: new Date().toISOString().split('T')[0],
+        summary: {
+          targetUserId: formUserId,
+          targetName: formName,
+          targetRole: formRole,
+          items: [],
+          totalQty: 0,
+        },
+      });
+
       setMessage({ type: 'success', text: `계정 "${formUserId}"이(가) 생성되었습니다.` });
       resetForm();
       loadUsers();
@@ -196,6 +211,26 @@ export default function UserManage({ currentUserId }: Props) {
 
       if (profileError) throw profileError;
 
+      // 활동 이력 기록
+      const changes: string[] = [];
+      if (formName !== editingUser.name) changes.push(`이름: ${editingUser.name} → ${formName}`);
+      if (formRole !== editingUser.role) changes.push(`역할: ${editingUser.role} → ${formRole}`);
+      if (formPassword) changes.push('비밀번호 변경');
+
+      await supabase.from('activity_log').insert({
+        user_id: currentUserId,
+        action_type: 'user_update',
+        work_order_id: null,
+        action_date: new Date().toISOString().split('T')[0],
+        summary: {
+          targetUserId: editingUser.userId,
+          targetName: editingUser.name,
+          changes,
+          items: [],
+          totalQty: 0,
+        },
+      });
+
       setMessage({ type: 'success', text: `계정 "${editingUser.userId}" 정보가 수정되었습니다.` });
       resetForm();
       loadUsers();
@@ -217,6 +252,21 @@ export default function UserManage({ currentUserId }: Props) {
       await supabaseAdmin.from('user_profile').delete().eq('id', user.id);
       const { error } = await supabaseAdmin.auth.admin.deleteUser(user.id);
       if (error) throw error;
+
+      // 활동 이력 기록
+      await supabase.from('activity_log').insert({
+        user_id: currentUserId,
+        action_type: 'user_delete',
+        work_order_id: null,
+        action_date: new Date().toISOString().split('T')[0],
+        summary: {
+          targetUserId: user.userId,
+          targetName: user.name,
+          targetRole: user.role,
+          items: [],
+          totalQty: 0,
+        },
+      });
 
       setMessage({ type: 'success', text: `계정 "${user.userId}"이(가) 삭제되었습니다.` });
       loadUsers();

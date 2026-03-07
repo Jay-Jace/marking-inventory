@@ -17,6 +17,14 @@ const actionLabels: Record<string, string> = {
   receipt_check: '입고 확인',
   marking_work: '마킹 작업',
   shipment_out: '출고 확인',
+  shipment_cancel_request: '취소 요청',
+  shipment_cancel_approved: '취소 승인',
+  shipment_modify_request: '수정 요청',
+  shipment_modify_approved: '수정 승인',
+  inventory_adjust: '재고 수정',
+  user_create: '계정 생성',
+  user_update: '계정 수정',
+  user_delete: '계정 삭제',
 };
 
 const actionColors: Record<string, string> = {
@@ -24,6 +32,14 @@ const actionColors: Record<string, string> = {
   receipt_check: 'bg-blue-100 text-blue-700',
   marking_work: 'bg-purple-100 text-purple-700',
   shipment_out: 'bg-emerald-100 text-emerald-700',
+  shipment_cancel_request: 'bg-red-100 text-red-700',
+  shipment_cancel_approved: 'bg-red-100 text-red-700',
+  shipment_modify_request: 'bg-amber-100 text-amber-700',
+  shipment_modify_approved: 'bg-amber-100 text-amber-700',
+  inventory_adjust: 'bg-cyan-100 text-cyan-700',
+  user_create: 'bg-green-100 text-green-700',
+  user_update: 'bg-yellow-100 text-yellow-700',
+  user_delete: 'bg-red-100 text-red-700',
 };
 
 export default function ActivityHistory() {
