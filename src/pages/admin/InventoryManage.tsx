@@ -119,22 +119,23 @@ export default function InventoryManage() {
         .eq('sku_id', row.sku_id);
       if (updErr) throw updErr;
 
-      // activity_log 기록
-      const { data: userData } = await supabase.auth.getUser();
-      await supabase.from('activity_log').insert({
-        user_id: userData.user?.id,
-        action_type: 'inventory_adjust',
-        work_order_id: null,
-        action_date: new Date().toISOString().split('T')[0],
-        summary: {
-          warehouse: currentTab.warehouseName,
-          skuId: row.sku_id,
-          skuName: row.sku?.sku_name || '',
-          before: row.quantity,
-          after: editQty,
-          items: [],
-          totalQty: editQty,
-        },
+      // activity_log 기록 (실패해도 재고 수정에 영향 없음)
+      supabase.auth.getUser().then(({ data: userData }) => {
+        supabase.from('activity_log').insert({
+          user_id: userData.user?.id,
+          action_type: 'inventory_adjust',
+          work_order_id: null,
+          action_date: new Date().toISOString().split('T')[0],
+          summary: {
+            warehouse: currentTab.warehouseName,
+            skuId: row.sku_id,
+            skuName: row.sku?.sku_name || '',
+            before: row.quantity,
+            after: editQty,
+            items: [],
+            totalQty: editQty,
+          },
+        }).then(({ error: logErr }) => { if (logErr) console.warn('activity_log insert failed:', logErr.message); });
       });
 
       // 로컬 상태 업데이트

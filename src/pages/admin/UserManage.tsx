@@ -161,8 +161,8 @@ export default function UserManage({ currentUserId }: Props) {
 
       if (profileError) throw profileError;
 
-      // 활동 이력 기록
-      await supabase.from('activity_log').insert({
+      // 활동 이력 기록 (실패해도 계정 생성에 영향 없음)
+      supabase.from('activity_log').insert({
         user_id: currentUserId,
         action_type: 'user_create',
         work_order_id: null,
@@ -174,7 +174,7 @@ export default function UserManage({ currentUserId }: Props) {
           items: [],
           totalQty: 0,
         },
-      });
+      }).then(({ error }) => { if (error) console.warn('activity_log insert failed:', error.message); });
 
       setMessage({ type: 'success', text: `계정 "${formUserId}"이(가) 생성되었습니다.` });
       resetForm();
@@ -217,7 +217,7 @@ export default function UserManage({ currentUserId }: Props) {
       if (formRole !== editingUser.role) changes.push(`역할: ${editingUser.role} → ${formRole}`);
       if (formPassword) changes.push('비밀번호 변경');
 
-      await supabase.from('activity_log').insert({
+      supabase.from('activity_log').insert({
         user_id: currentUserId,
         action_type: 'user_update',
         work_order_id: null,
@@ -229,7 +229,7 @@ export default function UserManage({ currentUserId }: Props) {
           items: [],
           totalQty: 0,
         },
-      });
+      }).then(({ error }) => { if (error) console.warn('activity_log insert failed:', error.message); });
 
       setMessage({ type: 'success', text: `계정 "${editingUser.userId}" 정보가 수정되었습니다.` });
       resetForm();
@@ -253,8 +253,8 @@ export default function UserManage({ currentUserId }: Props) {
       const { error } = await supabaseAdmin.auth.admin.deleteUser(user.id);
       if (error) throw error;
 
-      // 활동 이력 기록
-      await supabase.from('activity_log').insert({
+      // 활동 이력 기록 (실패해도 삭제에 영향 없음)
+      supabase.from('activity_log').insert({
         user_id: currentUserId,
         action_type: 'user_delete',
         work_order_id: null,
@@ -266,7 +266,7 @@ export default function UserManage({ currentUserId }: Props) {
           items: [],
           totalQty: 0,
         },
-      });
+      }).then(({ error: logErr }) => { if (logErr) console.warn('activity_log insert failed:', logErr.message); });
 
       setMessage({ type: 'success', text: `계정 "${user.userId}"이(가) 삭제되었습니다.` });
       loadUsers();
