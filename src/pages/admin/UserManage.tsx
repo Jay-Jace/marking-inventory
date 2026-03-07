@@ -49,7 +49,7 @@ export default function UserManage({ currentUserId }: Props) {
   const loadUsers = async () => {
     setLoading(true);
     try {
-      const { data: profiles, error: profileErr } = await supabase
+      const { data: profiles, error: profileErr } = await supabaseAdmin
         .from('user_profile')
         .select('id, name, role, created_at')
         .order('created_at', { ascending: false });
