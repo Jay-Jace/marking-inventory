@@ -9,6 +9,7 @@ import {
   Database,
   PackageCheck,
   ClipboardList,
+  Clock,
   Users,
   LogOut,
   Menu,
@@ -60,6 +61,12 @@ const navItems: NavItem[] = [
     label: '계정 관리',
     path: '/admin/users',
     icon: <Users size={18} />,
+    roles: ['admin'],
+  },
+  {
+    label: '활동 이력',
+    path: '/admin/history',
+    icon: <Clock size={18} />,
     roles: ['admin'],
   },
   {

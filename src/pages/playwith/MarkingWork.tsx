@@ -3,6 +3,7 @@ import { supabase } from '../../lib/supabase';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
+import type { AppUser } from '../../types';
 import {
   AlertTriangle,
   CheckCircle,
@@ -40,7 +41,7 @@ interface HistoryItem {
 
 // ── 컴포넌트 ────────────────────────────────────
 
-export default function MarkingWork() {
+export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   const isStale = useStaleGuard();
   const [orders, setOrders] = useState<ActiveOrder[]>([]);
   const [selectedOrder, setSelectedOrder] = useState<ActiveOrder | null>(null);
@@ -442,6 +443,24 @@ export default function MarkingWork() {
         .update({ status: allDone ? '마킹완료' : '마킹중' })
         .eq('id', selectedOrder.id);
       if (statusErr) throw statusErr;
+
+      // Activity log
+      try {
+        const logItems = activeItems.map((item) => ({
+          skuId: item.finishedSkuId, skuName: item.skuName, completedQty: item.todayQty,
+        }));
+        await supabase.from('activity_log').insert({
+          user_id: currentUser.id,
+          action_type: 'marking_work',
+          work_order_id: selectedOrder.id,
+          action_date: today,
+          summary: {
+            items: logItems,
+            totalQty: logItems.reduce((s, i) => s + i.completedQty, 0),
+            workOrderDate: selectedOrder.download_date,
+          },
+        });
+      } catch (logErr) { console.warn('Activity log failed:', logErr); }
 
       // DB 재조회로 완료 아이템 자동 제거 + 잔여 수량 갱신
       await selectOrder(selectedOrder);

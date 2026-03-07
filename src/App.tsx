@@ -19,6 +19,7 @@ import ShipmentConfirm from './pages/offline/ShipmentConfirm';
 import ReceiptCheck from './pages/playwith/ReceiptCheck';
 import MarkingWork from './pages/playwith/MarkingWork';
 import ShipmentOut from './pages/playwith/ShipmentOut';
+import ActivityHistory from './pages/admin/ActivityHistory';
 import type { UserRole, AppUser } from './types';
 
 function AppContent() {
@@ -160,14 +161,15 @@ function AppContent() {
         <Route path="/admin/inventory" element={<InventoryUpload />} />
         {/* currentUserId를 prop으로 전달 → UserManage 내 getSession() 중복 제거 */}
         <Route path="/admin/users" element={<UserManage currentUserId={user.id} />} />
+        <Route path="/admin/history" element={<ActivityHistory />} />
 
         {/* 오프라인 매장 */}
-        <Route path="/offline/shipment" element={<ShipmentConfirm />} />
+        <Route path="/offline/shipment" element={<ShipmentConfirm currentUser={user} />} />
 
         {/* 플레이위즈 */}
-        <Route path="/playwith/receipt" element={<ReceiptCheck />} />
-        <Route path="/playwith/marking" element={<MarkingWork />} />
-        <Route path="/playwith/shipment" element={<ShipmentOut />} />
+        <Route path="/playwith/receipt" element={<ReceiptCheck currentUser={user} />} />
+        <Route path="/playwith/marking" element={<MarkingWork currentUser={user} />} />
+        <Route path="/playwith/shipment" element={<ShipmentOut currentUser={user} />} />
 
         {/* 기본 리다이렉트 */}
         <Route

@@ -76,3 +76,20 @@ export interface AppUser {
   role: UserRole;
   name: string;
 }
+
+export type ActionType = 'shipment_confirm' | 'receipt_check' | 'marking_work' | 'shipment_out';
+
+export interface ActivityLog {
+  id: string;
+  user_id: string;
+  action_type: ActionType;
+  work_order_id: string | null;
+  action_date: string;
+  summary: {
+    items: { skuId: string; skuName: string; [key: string]: any }[];
+    totalQty: number;
+    workOrderDate?: string;
+  };
+  created_at: string;
+  user_profile?: { name: string; role: string };
+}

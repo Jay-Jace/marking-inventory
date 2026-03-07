@@ -1,9 +1,10 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
-import { AlertTriangle, CheckCircle, Download, FileUp, Truck } from 'lucide-react';
+import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, FileUp, Truck } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
+import type { AppUser } from '../../types';
 
 interface ShipmentItem {
   lineId: string;
@@ -22,7 +23,7 @@ interface ActiveWorkOrder {
   download_date: string;
 }
 
-export default function ShipmentConfirm() {
+export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser }) {
   const isStale = useStaleGuard();
   const [workOrders, setWorkOrders] = useState<ActiveWorkOrder[]>([]);
   const [selectedWo, setSelectedWo] = useState<ActiveWorkOrder | null>(null);
@@ -35,6 +36,13 @@ export default function ShipmentConfirm() {
   const [uploadComparison, setUploadComparison] = useState<{ rows: ComparisonRow[]; unmatched: string[] } | null>(null);
   const [xlsxError, setXlsxError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 이력 조회
+  const today = new Date().toISOString().split('T')[0];
+  const [selectedDate, setSelectedDate] = useState(today);
+  const [historyItems, setHistoryItems] = useState<{ skuName: string; qty: number }[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const isToday = selectedDate === today;
 
   useEffect(() => {
     loadPendingOrders();
@@ -176,6 +184,40 @@ export default function ShipmentConfirm() {
     }
   };
 
+  const changeDate = (offset: number) => {
+    const d = new Date(selectedDate);
+    d.setDate(d.getDate() + offset);
+    const newDate = d.toISOString().split('T')[0];
+    if (newDate > today) return;
+    setSelectedDate(newDate);
+    if (newDate === today) { setHistoryItems([]); } else { loadHistory(newDate); }
+  };
+
+  const loadHistory = async (date: string) => {
+    setHistoryLoading(true);
+    try {
+      const { data } = await supabase
+        .from('activity_log')
+        .select('summary')
+        .eq('user_id', currentUser.id)
+        .eq('action_type', 'shipment_confirm')
+        .eq('action_date', date);
+      const items = (data || []).flatMap((d: any) =>
+        (d.summary?.items || []).map((i: any) => ({ skuName: i.skuName, qty: i.sentQty || 0 }))
+      );
+      setHistoryItems(items);
+    } catch { /* silent */ }
+    finally { setHistoryLoading(false); }
+  };
+
+  const formatDate = (d: string) => {
+    const date = new Date(d + 'T00:00:00');
+    const mm = date.getMonth() + 1;
+    const dd = date.getDate();
+    const dayNames = ['일', '월', '화', '수', '목', '금', '토'];
+    return `${mm}월 ${dd}일 (${dayNames[date.getDay()]})`;
+  };
+
   const handleSentChange = (skuId: string, value: number) => {
     setItems((prev) =>
       prev.map((item) =>
@@ -315,6 +357,21 @@ export default function ShipmentConfirm() {
         }
       }
 
+      // Activity log
+      try {
+        await supabase.from('activity_log').insert({
+          user_id: currentUser.id,
+          action_type: 'shipment_confirm',
+          work_order_id: selectedWo.id,
+          action_date: new Date().toISOString().split('T')[0],
+          summary: {
+            items: items.map((i) => ({ skuId: i.skuId, skuName: i.skuName, sentQty: i.sentQty })),
+            totalQty: items.reduce((s, i) => s + i.sentQty, 0),
+            workOrderDate: selectedWo.download_date,
+          },
+        });
+      } catch (logErr) { console.warn('Activity log failed:', logErr); }
+
       setConfirmed(true);
       loadPendingOrders();
     } catch (e: any) {
@@ -329,25 +386,96 @@ export default function ShipmentConfirm() {
     return <div className="flex items-center justify-center h-64 text-gray-400">불러오는 중...</div>;
   }
 
-  if (workOrders.length === 0 && !confirmed) {
+  const noWorkToday = (workOrders.length === 0 && !confirmed) || confirmed;
+
+  if (noWorkToday && isToday) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-center">
-          <CheckCircle size={48} className="mx-auto text-green-500 mb-3" />
-          <p className="text-gray-600 font-medium">발송 대기 중인 물량이 없습니다</p>
-          <p className="text-sm text-gray-400 mt-1">관리자가 작업지시서를 등록하면 표시됩니다</p>
+      <div className="space-y-5 max-w-lg">
+        {/* 날짜 네비게이션 */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-4 py-3">
+          <div className="flex items-center justify-between">
+            <button onClick={() => changeDate(-1)} className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-500">
+              <ChevronLeft size={18} />
+            </button>
+            <div className="text-center">
+              <p className="text-sm font-semibold text-gray-900">{formatDate(selectedDate)}</p>
+              <span className="text-xs text-blue-600 font-medium">오늘</span>
+            </div>
+            <button disabled className="p-1.5 rounded-lg text-gray-500 opacity-30 cursor-not-allowed">
+              <ChevronRight size={18} />
+            </button>
+          </div>
+        </div>
+        <div className="flex items-center justify-center h-48">
+          <div className="text-center">
+            {confirmed ? (
+              <>
+                <Truck size={48} className="mx-auto text-blue-500 mb-3" />
+                <p className="text-gray-700 font-semibold text-lg">발송 완료 처리되었습니다</p>
+                <p className="text-sm text-gray-400 mt-1">플레이위즈에서 입고 확인을 진행해주세요</p>
+              </>
+            ) : (
+              <>
+                <CheckCircle size={48} className="mx-auto text-green-500 mb-3" />
+                <p className="text-gray-600 font-medium">발송 대기 중인 물량이 없습니다</p>
+                <p className="text-sm text-gray-400 mt-1">관리자가 작업지시서를 등록하면 표시됩니다</p>
+              </>
+            )}
+          </div>
         </div>
       </div>
     );
   }
 
-  if (confirmed) {
+  if (noWorkToday && !isToday) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-center">
-          <Truck size={48} className="mx-auto text-blue-500 mb-3" />
-          <p className="text-gray-700 font-semibold text-lg">발송 완료 처리되었습니다</p>
-          <p className="text-sm text-gray-400 mt-1">플레이위즈에서 입고 확인을 진행해주세요</p>
+      <div className="space-y-5 max-w-lg">
+        {/* 날짜 네비게이션 */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-4 py-3">
+          <div className="flex items-center justify-between">
+            <button onClick={() => changeDate(-1)} className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-500">
+              <ChevronLeft size={18} />
+            </button>
+            <div className="text-center">
+              <p className="text-sm font-semibold text-gray-900">{formatDate(selectedDate)}</p>
+              <span className="text-xs text-gray-400">이력 조회 (읽기 전용)</span>
+            </div>
+            <button onClick={() => changeDate(1)} className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-500">
+              <ChevronRight size={18} />
+            </button>
+          </div>
+        </div>
+        {/* 이력 패널 */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-100 bg-gray-50">
+            <h3 className="font-medium text-gray-700">{formatDate(selectedDate)} 발송 이력</h3>
+            <p className="text-xs text-gray-400 mt-0.5">읽기 전용</p>
+          </div>
+          {historyLoading ? (
+            <div className="px-5 py-8 text-center text-gray-400 text-sm">불러오는 중...</div>
+          ) : historyItems.length === 0 ? (
+            <div className="px-5 py-8 text-center text-gray-400 text-sm">이 날짜에 기록된 발송이 없습니다</div>
+          ) : (
+            <>
+              <div className="divide-y divide-gray-50">
+                {historyItems.map((h, idx) => (
+                  <div key={idx} className="px-5 py-3.5 flex items-center gap-3">
+                    <p className="text-sm font-medium text-gray-900 truncate flex-1">{h.skuName}</p>
+                    <p className="text-sm font-semibold text-gray-700 flex-shrink-0">{h.qty}개</p>
+                  </div>
+                ))}
+              </div>
+              <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
+                <p className="text-sm text-gray-600">총 발송:</p>
+                <p className="text-sm font-bold text-gray-900">{historyItems.reduce((s, h) => s + h.qty, 0)}개</p>
+              </div>
+            </>
+          )}
+          <div className="px-5 py-3 bg-blue-50 border-t border-blue-100 text-center">
+            <button onClick={() => { setSelectedDate(today); setHistoryItems([]); }} className="text-sm text-blue-600 font-medium hover:underline">
+              오늘 작업으로 돌아가기
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -371,8 +499,63 @@ export default function ShipmentConfirm() {
         </div>
       )}
 
+      {/* 날짜 네비게이션 */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-4 py-3">
+        <div className="flex items-center justify-between">
+          <button onClick={() => changeDate(-1)} className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-500">
+            <ChevronLeft size={18} />
+          </button>
+          <div className="text-center">
+            <p className="text-sm font-semibold text-gray-900">{formatDate(selectedDate)}</p>
+            {isToday ? (
+              <span className="text-xs text-blue-600 font-medium">오늘 — 작업 모드</span>
+            ) : (
+              <span className="text-xs text-gray-400">이력 조회 (읽기 전용)</span>
+            )}
+          </div>
+          <button onClick={() => changeDate(1)} disabled={isToday} className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-500 disabled:opacity-30 disabled:cursor-not-allowed">
+            <ChevronRight size={18} />
+          </button>
+        </div>
+      </div>
+
+      {/* 과거 이력 조회 모드 */}
+      {!isToday && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-100 bg-gray-50">
+            <h3 className="font-medium text-gray-700">{formatDate(selectedDate)} 발송 이력</h3>
+            <p className="text-xs text-gray-400 mt-0.5">읽기 전용</p>
+          </div>
+          {historyLoading ? (
+            <div className="px-5 py-8 text-center text-gray-400 text-sm">불러오는 중...</div>
+          ) : historyItems.length === 0 ? (
+            <div className="px-5 py-8 text-center text-gray-400 text-sm">이 날짜에 기록된 발송이 없습니다</div>
+          ) : (
+            <>
+              <div className="divide-y divide-gray-50">
+                {historyItems.map((h, idx) => (
+                  <div key={idx} className="px-5 py-3.5 flex items-center gap-3">
+                    <p className="text-sm font-medium text-gray-900 truncate flex-1">{h.skuName}</p>
+                    <p className="text-sm font-semibold text-gray-700 flex-shrink-0">{h.qty}개</p>
+                  </div>
+                ))}
+              </div>
+              <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
+                <p className="text-sm text-gray-600">총 발송:</p>
+                <p className="text-sm font-bold text-gray-900">{historyItems.reduce((s, h) => s + h.qty, 0)}개</p>
+              </div>
+            </>
+          )}
+          <div className="px-5 py-3 bg-blue-50 border-t border-blue-100 text-center">
+            <button onClick={() => { setSelectedDate(today); setHistoryItems([]); }} className="text-sm text-blue-600 font-medium hover:underline">
+              오늘 작업으로 돌아가기
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 헤더 */}
-      <div className="flex items-center justify-between gap-2">
+      {isToday && <><div className="flex items-center justify-between gap-2">
         <h2 className="text-xl font-bold text-gray-900">발송 확인</h2>
         {workOrders.length > 1 && (
           <select
@@ -602,6 +785,7 @@ export default function ShipmentConfirm() {
       <p className="text-xs text-center text-gray-400">
         버튼 클릭 시 플레이위즈에 발송 완료 신호가 전달됩니다
       </p>
+      </>}
     </div>
   );
 }

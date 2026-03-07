@@ -86,6 +86,22 @@ create table if not exists user_profile (
   created_at timestamptz default now()
 );
 
+-- 9. 활동 로그 (각 화면 작업 이력)
+create table if not exists activity_log (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id),
+  action_type text not null check (
+    action_type in ('shipment_confirm', 'receipt_check', 'marking_work', 'shipment_out')
+  ),
+  work_order_id uuid references work_order(id),
+  action_date date not null default current_date,
+  summary jsonb not null default '{}',
+  created_at timestamptz default now()
+);
+
+create index if not exists idx_activity_log_user_date on activity_log (user_id, action_date);
+create index if not exists idx_activity_log_action_date on activity_log (action_date, action_type);
+
 -- =============================================
 -- Row Level Security (RLS) 설정
 -- =============================================
@@ -98,6 +114,7 @@ alter table work_order enable row level security;
 alter table work_order_line enable row level security;
 alter table daily_marking enable row level security;
 alter table user_profile enable row level security;
+alter table activity_log enable row level security;
 
 -- 인증된 사용자는 모두 읽기 가능
 create policy "authenticated_read_sku" on sku for select using (auth.role() = 'authenticated');
@@ -118,3 +135,5 @@ create policy "authenticated_write_work_order" on work_order for all using (auth
 create policy "authenticated_write_work_order_line" on work_order_line for all using (auth.role() = 'authenticated');
 create policy "authenticated_write_daily_marking" on daily_marking for all using (auth.role() = 'authenticated');
 create policy "authenticated_write_user_profile" on user_profile for all using (auth.uid() = id);
+create policy "authenticated_read_activity_log" on activity_log for select using (auth.role() = 'authenticated');
+create policy "authenticated_write_activity_log" on activity_log for all using (auth.role() = 'authenticated');

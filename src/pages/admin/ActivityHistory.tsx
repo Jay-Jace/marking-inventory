@@ -1,0 +1,211 @@
+import { useEffect, useState } from 'react';
+import { supabase } from '../../lib/supabase';
+import { ChevronLeft, ChevronRight, ChevronDown, ChevronUp } from 'lucide-react';
+
+interface LogEntry {
+  id: string;
+  user_id: string;
+  action_type: string;
+  work_order_id: string | null;
+  action_date: string;
+  summary: any;
+  created_at: string;
+}
+
+const actionLabels: Record<string, string> = {
+  shipment_confirm: '발송 확인',
+  receipt_check: '입고 확인',
+  marking_work: '마킹 작업',
+  shipment_out: '출고 확인',
+};
+
+const actionColors: Record<string, string> = {
+  shipment_confirm: 'bg-orange-100 text-orange-700',
+  receipt_check: 'bg-blue-100 text-blue-700',
+  marking_work: 'bg-purple-100 text-purple-700',
+  shipment_out: 'bg-emerald-100 text-emerald-700',
+};
+
+export default function ActivityHistory() {
+  const today = new Date().toISOString().split('T')[0];
+  const [selectedDate, setSelectedDate] = useState(today);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [actionFilter, setActionFilter] = useState<string>('');
+  const [userFilter, setUserFilter] = useState<string>('');
+  const [users, setUsers] = useState<{ id: string; name: string; role: string }[]>([]);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    loadUsers();
+  }, []);
+
+  useEffect(() => {
+    loadLogs();
+  }, [selectedDate, actionFilter, userFilter]);
+
+  const loadUsers = async () => {
+    const { data } = await supabase.from('user_profile').select('id, name, role');
+    if (data) setUsers(data as any[]);
+  };
+
+  const loadLogs = async () => {
+    setLoading(true);
+    try {
+      let query = supabase
+        .from('activity_log')
+        .select('*')
+        .eq('action_date', selectedDate)
+        .order('created_at', { ascending: false })
+        .limit(100);
+
+      if (actionFilter) query = query.eq('action_type', actionFilter);
+      if (userFilter) query = query.eq('user_id', userFilter);
+
+      const { data, error } = await query;
+      if (error) throw error;
+      setLogs((data || []) as LogEntry[]);
+    } catch (e: any) {
+      console.error('Failed to load activity logs:', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const changeDate = (offset: number) => {
+    const d = new Date(selectedDate);
+    d.setDate(d.getDate() + offset);
+    const newDate = d.toISOString().split('T')[0];
+    if (newDate > today) return;
+    setSelectedDate(newDate);
+  };
+
+  const formatDate = (d: string) => {
+    const date = new Date(d + 'T00:00:00');
+    const mm = date.getMonth() + 1;
+    const dd = date.getDate();
+    const dayNames = ['일', '월', '화', '수', '목', '금', '토'];
+    return `${mm}월 ${dd}일 (${dayNames[date.getDay()]})`;
+  };
+
+  const formatTime = (ts: string) => {
+    const d = new Date(ts);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  };
+
+  return (
+    <div className="space-y-5 max-w-4xl">
+      <h2 className="text-xl font-bold text-gray-900">활동 이력</h2>
+
+      {/* 날짜 네비게이션 */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 px-4 py-3">
+        <div className="flex items-center justify-between">
+          <button onClick={() => changeDate(-1)} className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-500">
+            <ChevronLeft size={18} />
+          </button>
+          <div className="text-center">
+            <p className="text-sm font-semibold text-gray-900">{formatDate(selectedDate)}</p>
+            {selectedDate === today && <span className="text-xs text-blue-600 font-medium">오늘</span>}
+          </div>
+          <button onClick={() => changeDate(1)} disabled={selectedDate === today} className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-500 disabled:opacity-30 disabled:cursor-not-allowed">
+            <ChevronRight size={18} />
+          </button>
+        </div>
+      </div>
+
+      {/* 필터 */}
+      <div className="flex gap-3">
+        <select
+          value={actionFilter}
+          onChange={(e) => setActionFilter(e.target.value)}
+          className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          <option value="">전체 유형</option>
+          {Object.entries(actionLabels).map(([key, label]) => (
+            <option key={key} value={key}>{label}</option>
+          ))}
+        </select>
+        <select
+          value={userFilter}
+          onChange={(e) => setUserFilter(e.target.value)}
+          className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        >
+          <option value="">전체 사용자</option>
+          {users.map((u) => (
+            <option key={u.id} value={u.id}>{u.name} ({u.role})</option>
+          ))}
+        </select>
+      </div>
+
+      {/* 결과 */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+        {loading ? (
+          <div className="px-5 py-12 text-center text-gray-400 text-sm">불러오는 중...</div>
+        ) : logs.length === 0 ? (
+          <div className="px-5 py-12 text-center text-gray-400 text-sm">
+            {formatDate(selectedDate)}에 기록된 활동이 없습니다
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-100">
+            {logs.map((log) => {
+              const isExpanded = expandedId === log.id;
+              const items = log.summary?.items || [];
+              const totalQty = log.summary?.totalQty || 0;
+              const userName = users.find((u) => u.id === log.user_id)?.name || '—';
+              return (
+                <div key={log.id}>
+                  <button
+                    onClick={() => setExpandedId(isExpanded ? null : log.id)}
+                    className="w-full px-5 py-3.5 flex items-center gap-4 hover:bg-gray-50 transition-colors text-left"
+                  >
+                    <span className="text-xs text-gray-400 font-mono w-12 flex-shrink-0">
+                      {formatTime(log.created_at)}
+                    </span>
+                    <span className="text-sm text-gray-700 w-16 flex-shrink-0 truncate">
+                      {userName}
+                    </span>
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium flex-shrink-0 ${actionColors[log.action_type] || 'bg-gray-100 text-gray-600'}`}>
+                      {actionLabels[log.action_type] || log.action_type}
+                    </span>
+                    <span className="text-sm text-gray-500 flex-shrink-0">
+                      {log.summary?.workOrderDate || '—'}
+                    </span>
+                    <span className="text-sm font-semibold text-gray-800 ml-auto flex-shrink-0">
+                      {totalQty}개
+                    </span>
+                    {isExpanded ? <ChevronUp size={14} className="text-gray-400" /> : <ChevronDown size={14} className="text-gray-400" />}
+                  </button>
+                  {isExpanded && items.length > 0 && (
+                    <div className="bg-gray-50 px-5 py-3 border-t border-gray-100">
+                      <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                        {items.map((item: any, idx: number) => {
+                          const qty = item.sentQty || item.actualQty || item.completedQty || item.shipQty || 0;
+                          return (
+                            <div key={idx} className="flex items-center justify-between text-xs">
+                              <span className="text-gray-600 truncate flex-1 mr-2">{item.skuName}</span>
+                              <span className="text-gray-800 font-medium flex-shrink-0">{qty}개</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* 요약 */}
+        {!loading && logs.length > 0 && (
+          <div className="px-5 py-3 bg-gray-50 border-t border-gray-200 flex items-center justify-between">
+            <p className="text-sm text-gray-600">총 {logs.length}건</p>
+            <p className="text-sm font-bold text-gray-900">
+              합계 {logs.reduce((s, l) => s + (l.summary?.totalQty || 0), 0)}개
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
