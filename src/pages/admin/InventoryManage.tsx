@@ -59,7 +59,13 @@ export default function InventoryManage() {
         .gt('quantity', 0)
         .order('sku_id');
       if (invErr) throw invErr;
-      setRows((data as InventoryRow[]) || []);
+      setRows(
+        ((data || []) as any[]).map((r) => ({
+          sku_id: r.sku_id,
+          quantity: r.quantity,
+          sku: Array.isArray(r.sku) ? r.sku[0] || null : r.sku,
+        }))
+      );
     } catch (err: any) {
       setError(err.message || '데이터 조회 실패');
     } finally {
