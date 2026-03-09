@@ -203,11 +203,19 @@ export default function WorkOrderUpload() {
                 <p className="text-xs text-gray-500 mt-0.5">전체 라인</p>
               </div>
               <div className="bg-purple-50 rounded-lg p-3 text-center">
-                <p className="text-2xl font-bold text-purple-700">{result.markingLines.length}</p>
+                <p className="text-lg font-bold text-purple-700">
+                  {result.markingLines.length}<span className="text-sm font-medium">품목</span>
+                  {' / '}
+                  {result.markingLines.reduce((s, l) => s + l.quantity, 0).toLocaleString()}<span className="text-sm font-medium">수량</span>
+                </p>
                 <p className="text-xs text-purple-500 mt-0.5">마킹 필요</p>
               </div>
               <div className="bg-blue-50 rounded-lg p-3 text-center">
-                <p className="text-2xl font-bold text-blue-700">{result.nonMarkingLines.length}</p>
+                <p className="text-lg font-bold text-blue-700">
+                  {result.nonMarkingLines.length}<span className="text-sm font-medium">품목</span>
+                  {' / '}
+                  {result.nonMarkingLines.reduce((s, l) => s + l.quantity, 0).toLocaleString()}<span className="text-sm font-medium">수량</span>
+                </p>
                 <p className="text-xs text-blue-500 mt-0.5">단품 주문</p>
               </div>
             </div>

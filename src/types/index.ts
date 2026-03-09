@@ -33,6 +33,8 @@ export type WorkOrderStatus =
   | '업로드됨'
   | '이관준비'
   | '이관중'
+  | '취소요청'
+  | '수정요청'
   | '입고확인완료'
   | '마킹중'
   | '마킹완료'
@@ -77,7 +79,7 @@ export interface AppUser {
   name: string;
 }
 
-export type ActionType = 'shipment_confirm' | 'receipt_check' | 'marking_work' | 'shipment_out';
+export type ActionType = 'shipment_confirm' | 'receipt_check' | 'marking_work' | 'shipment_out' | 'shipment_cancel_request' | 'shipment_cancel_approved' | 'shipment_modify_request' | 'shipment_modify_approved';
 
 export interface ActivityLog {
   id: string;

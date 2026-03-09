@@ -52,7 +52,7 @@ create table if not exists work_order (
   uploaded_at timestamptz default now(),
   download_date date not null,
   status text not null default '업로드됨' check (
-    status in ('업로드됨', '이관준비', '이관중', '입고확인완료', '마킹중', '마킹완료', '출고완료')
+    status in ('업로드됨', '이관준비', '이관중', '취소요청', '수정요청', '입고확인완료', '마킹중', '마킹완료', '출고완료')
   )
 );
 
@@ -91,7 +91,7 @@ create table if not exists activity_log (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id),
   action_type text not null check (
-    action_type in ('shipment_confirm', 'receipt_check', 'marking_work', 'shipment_out')
+    action_type in ('shipment_confirm', 'receipt_check', 'marking_work', 'shipment_out', 'shipment_cancel_request', 'shipment_cancel_approved', 'shipment_modify_request', 'shipment_modify_approved')
   ),
   work_order_id uuid references work_order(id),
   action_date date not null default current_date,
