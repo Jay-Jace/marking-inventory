@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { parseBomExcel, parseBerrizBomExcel, type RawBomRow } from '../../lib/excelParser';
-import { Upload, Database, Trash2, AlertTriangle, CheckCircle, FileSpreadsheet } from 'lucide-react';
+import { Upload, Database, Trash2, AlertTriangle, CheckCircle, FileSpreadsheet, Search } from 'lucide-react';
 
 interface BomEntry {
   id: string;
@@ -22,6 +22,7 @@ export default function BOMManage() {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [mode, setMode] = useState<UploadMode>('berriz');
   const [isDragging, setIsDragging] = useState(false);
+  const [searchText, setSearchText] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -31,14 +32,25 @@ export default function BOMManage() {
   const loadBoms = async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('bom')
-        .select(
-          'id, finished_sku_id, finished_sku:sku!bom_finished_sku_id_fkey(sku_name), component_sku_id, component:sku!bom_component_sku_id_fkey(sku_name), quantity'
-        )
-        .order('finished_sku_id');
-      if (error) throw error;
-      setBoms((data || []) as any[]);
+      // 1,000행 제한 우회: 페이지네이션으로 전체 로드
+      const PAGE_SIZE = 1000;
+      const allRows: any[] = [];
+      let offset = 0;
+      while (true) {
+        const { data, error } = await supabase
+          .from('bom')
+          .select(
+            'id, finished_sku_id, finished_sku:sku!bom_finished_sku_id_fkey(sku_name), component_sku_id, component:sku!bom_component_sku_id_fkey(sku_name), quantity'
+          )
+          .order('finished_sku_id')
+          .range(offset, offset + PAGE_SIZE - 1);
+        if (error) throw error;
+        if (!data || data.length === 0) break;
+        allRows.push(...data);
+        if (data.length < PAGE_SIZE) break;
+        offset += PAGE_SIZE;
+      }
+      setBoms(allRows as BomEntry[]);
     } catch (err) {
       console.error('loadBoms error:', err);
     } finally {
@@ -141,21 +153,43 @@ export default function BOMManage() {
     }
   };
 
-  // 완제품별로 그룹화
+  // 검색 필터링 후 완제품별 그룹화
+  const filtered = searchText
+    ? boms.filter((bom) => {
+        const q = searchText.toLowerCase();
+        return (
+          bom.finished_sku_id.toLowerCase().includes(q) ||
+          (bom.finished_sku?.sku_name || '').toLowerCase().includes(q) ||
+          bom.component_sku_id.toLowerCase().includes(q) ||
+          (bom.component?.sku_name || '').toLowerCase().includes(q)
+        );
+      })
+    : boms;
+
   const grouped: Record<string, BomEntry[]> = {};
-  for (const bom of boms) {
+  for (const bom of filtered) {
     if (!grouped[bom.finished_sku_id]) grouped[bom.finished_sku_id] = [];
     grouped[bom.finished_sku_id].push(bom);
   }
 
   return (
     <div className="space-y-6 max-w-3xl">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center gap-3">
         <h2 className="text-xl font-bold text-gray-900">BOM 관리</h2>
+        <div className="relative flex-1 min-w-[200px]">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <input
+            type="text"
+            placeholder="완제품명, 단품명, SKU코드 검색"
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            className="w-full border border-gray-300 rounded-lg pl-9 pr-3 py-2 text-sm"
+          />
+        </div>
         <button
           onClick={() => fileInputRef.current?.click()}
           disabled={uploading}
-          className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-60 transition-colors"
+          className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-60 transition-colors shrink-0"
         >
           <Upload size={16} />
           {uploading ? '업로드 중...' : 'BOM 엑셀 업로드'}
@@ -281,7 +315,10 @@ export default function BOMManage() {
         <>
           <p className="text-sm text-gray-500">
             완제품 <span className="font-semibold text-gray-800">{Object.keys(grouped).length}</span>종 ·
-            BOM 엔트리 <span className="font-semibold text-gray-800">{boms.length}</span>건
+            BOM 엔트리 <span className="font-semibold text-gray-800">{filtered.length}</span>건
+            {searchText && filtered.length !== boms.length && (
+              <span className="text-blue-600 ml-1">(전체 {boms.length}건 중)</span>
+            )}
           </p>
           <div className="space-y-3">
             {Object.entries(grouped).map(([finishedSkuId, items]) => (
