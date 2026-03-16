@@ -8,6 +8,12 @@ interface InventorySummary {
   totalQty: number;
 }
 
+interface InventoryItem {
+  skuName: string;
+  skuType: string;
+  quantity: number;
+}
+
 interface ActiveOrder {
   id: string;
   downloadDate: string;
@@ -28,6 +34,7 @@ interface RequestDetail {
 
 export default function Dashboard() {
   const [inventories, setInventories] = useState<InventorySummary[]>([]);
+  const [offlineItems, setOfflineItems] = useState<InventoryItem[]>([]);
   const [activeOrders, setActiveOrders] = useState<ActiveOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -50,19 +57,29 @@ export default function Dashboard() {
       // 창고별 재고 요약
       const { data: invData, error: invError } = await supabase
         .from('inventory')
-        .select('quantity, warehouse(name)')
+        .select('quantity, warehouse(name), sku(sku_name, type)')
         .gt('quantity', 0);
       if (invError) throw invError;
 
       if (invData) {
         const summary: Record<string, InventorySummary> = {};
+        const offItems: InventoryItem[] = [];
         for (const row of invData as any[]) {
           const name = row.warehouse?.name || '알 수 없음';
           if (!summary[name]) summary[name] = { warehouseName: name, totalSkus: 0, totalQty: 0 };
           summary[name].totalSkus++;
           summary[name].totalQty += row.quantity;
+          if (name === '오프라인샵' && row.sku) {
+            offItems.push({
+              skuName: row.sku.sku_name || '이름 없음',
+              skuType: row.sku.type || '기타',
+              quantity: row.quantity,
+            });
+          }
         }
         setInventories(Object.values(summary));
+        offItems.sort((a, b) => b.quantity - a.quantity);
+        setOfflineItems(offItems);
       }
 
       // 진행 중인 작업지시서
@@ -387,13 +404,78 @@ export default function Dashboard() {
           창고별 재고 현황
         </h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {['오프라인샵', '플레이위즈'].map((wh) => {
-            const data = inventories.find((i) => i.warehouseName === wh);
+          {/* 오프라인샵 카드: 유니폼/마킹 상품명 목록 */}
+          {(() => {
+            const data = inventories.find((i) => i.warehouseName === '오프라인샵');
+            const uniforms = offlineItems.filter((i) => i.skuType === '유니폼단품');
+            const markings = offlineItems.filter((i) => i.skuType === '마킹단품');
+            const uniformTotal = uniforms.reduce((s, i) => s + i.quantity, 0);
+            const markingTotal = markings.reduce((s, i) => s + i.quantity, 0);
             return (
-              <div key={wh} className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
+              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-3">
+                    {warehouseIcon['오프라인샵']}
+                    <span className="font-medium text-gray-900">오프라인샵</span>
+                  </div>
+                  {data && (
+                    <span className="text-lg font-bold text-gray-900">총 {data.totalQty.toLocaleString()}개</span>
+                  )}
+                </div>
+                {!data ? (
+                  <p className="text-gray-400 text-sm">재고 없음</p>
+                ) : (
+                  <div className="space-y-3">
+                    {/* 유니폼 */}
+                    <div>
+                      <p className="text-xs font-semibold text-blue-600 mb-1.5">
+                        👕 유니폼 ({uniforms.length}종 · {uniformTotal.toLocaleString()}개)
+                      </p>
+                      {uniforms.length > 0 ? (
+                        <div className="space-y-1">
+                          {uniforms.map((item) => (
+                            <div key={item.skuName} className="flex items-center justify-between bg-blue-50 rounded-lg px-3 py-1.5">
+                              <span className="text-xs text-gray-800 truncate">{item.skuName}</span>
+                              <span className="text-xs font-semibold text-gray-700 flex-shrink-0 ml-2">{item.quantity.toLocaleString()}개</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-400 pl-1">없음</p>
+                      )}
+                    </div>
+                    {/* 마킹 */}
+                    <div>
+                      <p className="text-xs font-semibold text-purple-600 mb-1.5">
+                        🏷️ 마킹 ({markings.length}종 · {markingTotal.toLocaleString()}개)
+                      </p>
+                      {markings.length > 0 ? (
+                        <div className="space-y-1">
+                          {markings.map((item) => (
+                            <div key={item.skuName} className="flex items-center justify-between bg-purple-50 rounded-lg px-3 py-1.5">
+                              <span className="text-xs text-gray-800 truncate">{item.skuName}</span>
+                              <span className="text-xs font-semibold text-gray-700 flex-shrink-0 ml-2">{item.quantity.toLocaleString()}개</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-400 pl-1">없음</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* 플레이위즈 카드: 기존 요약 유지 */}
+          {(() => {
+            const data = inventories.find((i) => i.warehouseName === '플레이위즈');
+            return (
+              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
                 <div className="flex items-center gap-3 mb-3">
-                  {warehouseIcon[wh]}
-                  <span className="font-medium text-gray-900">{wh}</span>
+                  {warehouseIcon['플레이위즈']}
+                  <span className="font-medium text-gray-900">플레이위즈</span>
                 </div>
                 {data ? (
                   <>
@@ -405,7 +487,7 @@ export default function Dashboard() {
                 )}
               </div>
             );
-          })}
+          })()}
         </div>
       </div>
 
