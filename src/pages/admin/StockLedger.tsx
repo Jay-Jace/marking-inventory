@@ -33,7 +33,7 @@ export default function StockLedger() {
   const [loading, setLoading] = useState(false);
 
   // CJ 엑셀 업로드
-  const [uploadType, setUploadType] = useState<'출고' | '입고' | '반품' | null>(null);
+  const [uploadType, setUploadType] = useState<TxType | null>(null);
   const [parsedItems, setParsedItems] = useState<CjTransaction[]>([]);
   const [skippedCount, setSkippedCount] = useState(0); // 중복 제거된 건수
   const [overlapWarning, setOverlapWarning] = useState<string | null>(null); // 기간 겹침 경고
