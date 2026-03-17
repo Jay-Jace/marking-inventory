@@ -18,6 +18,8 @@ interface LedgerRow {
   outQty: number;
   returnQty: number;
   adjustQty: number;
+  markingOutQty: number;
+  markingInQty: number;
   closing: number;
 }
 
@@ -31,6 +33,7 @@ export default function StockLedger() {
   const [searchText, setSearchText] = useState('');
   const [rows, setRows] = useState<LedgerRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // CJ 엑셀 업로드
   const [uploadType, setUploadType] = useState<TxType | null>(null);
@@ -95,12 +98,13 @@ export default function StockLedger() {
     const allRows: { warehouse_id: string; sku_id: string; tx_type: string; quantity: number }[] = [];
     let offset = 0;
     while (true) {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from('inventory_transaction')
         .select('warehouse_id, sku_id, tx_type, quantity')
         .gte('tx_date', from)
         .lte('tx_date', to)
         .range(offset, offset + PAGE_SIZE - 1);
+      if (error) throw new Error(`트랜잭션 조회 실패: ${error.message}`);
       if (!data || data.length === 0) break;
       allRows.push(...data);
       if (data.length < PAGE_SIZE) break; // 마지막 페이지
@@ -111,10 +115,11 @@ export default function StockLedger() {
 
   const fetchLedger = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const SYSTEM_START = '2026-02-01';
       const openingMap: Record<string, number> = {};
-      const txMap: Record<string, { in: number; out: number; return: number; adjust: number }> = {};
+      const txMap: Record<string, { in: number; out: number; return: number; adjust: number; markingOut: number; markingIn: number }> = {};
 
       // 기초/기간내를 각각 페이지네이션 조회 (1,000행 제한 우회)
       const prevDay = new Date(new Date(startDate).getTime() - 86400000).toISOString().slice(0, 10);
@@ -132,18 +137,22 @@ export default function StockLedger() {
           case '출고': openingMap[key] -= tx.quantity; break;
           case '반품': openingMap[key] += tx.quantity; break;
           case '재고조정': openingMap[key] += tx.quantity; break;
+          case '마킹출고': openingMap[key] -= tx.quantity; break;
+          case '마킹입고': openingMap[key] += tx.quantity; break;
         }
       }
 
       // 기간내 트랜잭션 집계
       for (const tx of txData) {
         const key = `${tx.warehouse_id}|${tx.sku_id}`;
-        if (!txMap[key]) txMap[key] = { in: 0, out: 0, return: 0, adjust: 0 };
+        if (!txMap[key]) txMap[key] = { in: 0, out: 0, return: 0, adjust: 0, markingOut: 0, markingIn: 0 };
         switch (tx.tx_type as TxType) {
           case '입고': txMap[key].in += tx.quantity; break;
           case '출고': txMap[key].out += tx.quantity; break;
           case '반품': txMap[key].return += tx.quantity; break;
           case '재고조정': txMap[key].adjust += tx.quantity; break;
+          case '마킹출고': txMap[key].markingOut += tx.quantity; break;
+          case '마킹입고': txMap[key].markingIn += tx.quantity; break;
         }
       }
 
@@ -178,15 +187,15 @@ export default function StockLedger() {
         }
       }
 
-      // 수불부 행 계산: 기초=0부터 시작, 기말 = 기초 + 입고 - 출고 + 반품 + 조정
+      // 수불부 행 계산: 기말 = 기초 + 입고 - 출고 + 반품 + 조정 - 마킹출고 + 마킹입고
       const ledgerRows: LedgerRow[] = [];
       for (const key of allKeys) {
         const opening = Math.max(0, openingMap[key] || 0);
-        const tx = txMap[key] || { in: 0, out: 0, return: 0, adjust: 0 };
-        const closing = opening + tx.in - tx.out + tx.return + tx.adjust;
+        const tx = txMap[key] || { in: 0, out: 0, return: 0, adjust: 0, markingOut: 0, markingIn: 0 };
+        const closing = opening + tx.in - tx.out + tx.return + tx.adjust - tx.markingOut + tx.markingIn;
         const info = skuInfoMap[key] || { name: '', barcode: '', whName: '' };
 
-        if (opening === 0 && closing === 0 && tx.in === 0 && tx.out === 0 && tx.return === 0 && tx.adjust === 0) continue;
+        if (opening === 0 && closing === 0 && tx.in === 0 && tx.out === 0 && tx.return === 0 && tx.adjust === 0 && tx.markingOut === 0 && tx.markingIn === 0) continue;
 
         ledgerRows.push({
           warehouseName: info.whName,
@@ -198,6 +207,8 @@ export default function StockLedger() {
           outQty: tx.out,
           returnQty: tx.return,
           adjustQty: tx.adjust,
+          markingOutQty: tx.markingOut,
+          markingInQty: tx.markingIn,
           closing,
         });
       }
@@ -205,16 +216,13 @@ export default function StockLedger() {
       // 정렬: 창고명 → SKU코드
       ledgerRows.sort((a, b) => a.warehouseName.localeCompare(b.warehouseName) || a.skuId.localeCompare(b.skuId));
       setRows(ledgerRows);
-    } catch (err) {
+    } catch (err: any) {
       console.error('수불부 조회 실패:', err);
+      setError(err.message || '수불부 조회 중 오류가 발생했습니다.');
     } finally {
       setLoading(false);
     }
   }, [startDate, endDate, warehouses]);
-
-  useEffect(() => {
-    if (warehouses.length > 0) fetchLedger();
-  }, [fetchLedger, warehouses]);
 
   // 필터링
   const filtered = rows.filter((r) => {
@@ -476,6 +484,8 @@ export default function StockLedger() {
       '출고': r.outQty,
       '반품': r.returnQty,
       '재고조정': r.adjustQty,
+      '마킹출고': r.markingOutQty,
+      '마킹입고': r.markingInQty,
       '기말': r.closing,
     }));
     const ws = XLSX.utils.json_to_sheet(exportData);
@@ -764,14 +774,25 @@ export default function StockLedger() {
                 <th className="px-3 py-3 text-right text-xs font-semibold text-red-600 whitespace-nowrap">출고</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-green-600 whitespace-nowrap">반품</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-orange-600 whitespace-nowrap">조정</th>
+                <th className="px-3 py-3 text-right text-xs font-semibold text-purple-600 whitespace-nowrap">마킹출고</th>
+                <th className="px-3 py-3 text-right text-xs font-semibold text-purple-600 whitespace-nowrap">마킹입고</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-gray-900 whitespace-nowrap">기말</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={10} className="px-3 py-8 text-center text-gray-400">조회 중...</td></tr>
+                <tr><td colSpan={12} className="px-3 py-8 text-center text-gray-400">조회 중...</td></tr>
+              ) : error ? (
+                <tr><td colSpan={12} className="px-3 py-8 text-center text-red-500">{error}</td></tr>
+              ) : rows.length === 0 ? (
+                <tr><td colSpan={12} className="px-3 py-12 text-center text-gray-400">
+                  <div className="flex flex-col items-center gap-2">
+                    <Search className="w-8 h-8 text-gray-300" />
+                    <p>조회 기간을 설정한 후 <strong className="text-gray-500">조회</strong> 버튼을 클릭하세요</p>
+                  </div>
+                </td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={10} className="px-3 py-8 text-center text-gray-400">데이터가 없습니다</td></tr>
+                <tr><td colSpan={12} className="px-3 py-8 text-center text-gray-400">검색 결과가 없습니다</td></tr>
               ) : (
                 <>
                   {/* 합계 행 (맨 위) */}
@@ -782,6 +803,8 @@ export default function StockLedger() {
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-red-600">{filtered.reduce((s, r) => s + r.outQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-green-600">{filtered.reduce((s, r) => s + r.returnQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-orange-600">{filtered.reduce((s, r) => s + r.adjustQty, 0).toLocaleString()}</td>
+                    <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-purple-600">{filtered.reduce((s, r) => s + r.markingOutQty, 0).toLocaleString()}</td>
+                    <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-purple-600">{filtered.reduce((s, r) => s + r.markingInQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums">{filtered.reduce((s, r) => s + r.closing, 0).toLocaleString()}</td>
                   </tr>
                   {filtered.map((r, i) => (
@@ -802,6 +825,12 @@ export default function StockLedger() {
                       </td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums text-orange-600 font-medium">
                         {r.adjustQty !== 0 ? r.adjustQty.toLocaleString() : '-'}
+                      </td>
+                      <td className="px-3 py-2 text-right text-xs tabular-nums text-purple-600 font-medium">
+                        {r.markingOutQty > 0 ? r.markingOutQty.toLocaleString() : '-'}
+                      </td>
+                      <td className="px-3 py-2 text-right text-xs tabular-nums text-purple-600 font-medium">
+                        {r.markingInQty > 0 ? r.markingInQty.toLocaleString() : '-'}
                       </td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums font-bold">{r.closing.toLocaleString()}</td>
                     </tr>

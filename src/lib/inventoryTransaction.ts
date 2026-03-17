@@ -14,7 +14,8 @@ interface RecordTxParams {
 
 /** 재고 변동 1건 기록 */
 export async function recordTransaction(params: RecordTxParams): Promise<void> {
-  if (params.quantity <= 0) return;
+  if (params.quantity === 0) return;
+  if (params.quantity < 0 && params.txType !== '재고조정') return;
   const { error } = await supabase.from('inventory_transaction').insert({
     warehouse_id: params.warehouseId,
     sku_id: params.skuId,
@@ -168,6 +169,8 @@ async function syncInventoryFromTransactions(rows: RecordTxParams[]): Promise<vo
       case '출고': entry.delta -= r.quantity; break;
       case '반품': entry.delta += r.quantity; break;
       case '재고조정': entry.delta += r.quantity; break;
+      case '마킹출고': entry.delta -= r.quantity; break;
+      case '마킹입고': entry.delta += r.quantity; break;
     }
   }
 
@@ -254,6 +257,8 @@ export async function deleteCjTransactions(params: {
       case '출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
       case '반품': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
       case '재고조정': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
+      case '마킹출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
+      case '마킹입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
     }
   }
 
@@ -280,6 +285,82 @@ export async function deleteCjTransactions(params: {
       .from('inventory')
       .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id' });
     if (upsertErr) console.error('[inventoryTransaction] delete inventory reverse error:', upsertErr);
+  }
+
+  return { deleted: deleteCount, error: null };
+}
+
+/** system 소스 트랜잭션 삭제 (실적 삭제용) + inventory 역반영 */
+export async function deleteSystemTransactions(params: {
+  warehouseId: string;
+  memo: string; // 정확 일치 (eq)
+}): Promise<{ deleted: number; error: string | null }> {
+  // 1) 삭제 대상 트랜잭션 조회
+  const { data: txToDelete, error: fetchErr } = await supabaseAdmin
+    .from('inventory_transaction')
+    .select('sku_id, tx_type, quantity')
+    .eq('source', 'system')
+    .eq('warehouse_id', params.warehouseId)
+    .eq('memo', params.memo);
+
+  if (fetchErr) {
+    return { deleted: 0, error: fetchErr.message };
+  }
+
+  const deleteCount = txToDelete?.length || 0;
+  if (deleteCount === 0) {
+    return { deleted: 0, error: null };
+  }
+
+  // 2) 트랜잭션 삭제
+  const { error } = await supabaseAdmin
+    .from('inventory_transaction')
+    .delete()
+    .eq('source', 'system')
+    .eq('warehouse_id', params.warehouseId)
+    .eq('memo', params.memo);
+
+  if (error) {
+    return { deleted: 0, error: error.message };
+  }
+
+  // 3) inventory 역반영 (삭제된 트랜잭션의 반대 방향)
+  const reverseDelta = new Map<string, number>();
+  for (const tx of txToDelete || []) {
+    const current = reverseDelta.get(tx.sku_id) || 0;
+    switch (tx.tx_type as TxType) {
+      case '입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
+      case '출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
+      case '반품': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
+      case '재고조정': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
+      case '마킹출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
+      case '마킹입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
+    }
+  }
+
+  const skuIds = [...reverseDelta.keys()];
+  for (let i = 0; i < skuIds.length; i += 500) {
+    const batch = skuIds.slice(i, i + 500);
+    const { data: existing } = await supabaseAdmin
+      .from('inventory')
+      .select('sku_id, quantity')
+      .eq('warehouse_id', params.warehouseId)
+      .in('sku_id', batch);
+
+    const existingMap = new Map(
+      (existing || []).map((e) => [e.sku_id, e.quantity as number])
+    );
+
+    const upsertRows = batch.map((skuId) => ({
+      warehouse_id: params.warehouseId,
+      sku_id: skuId,
+      quantity: Math.max(0, (existingMap.get(skuId) || 0) + (reverseDelta.get(skuId) || 0)),
+    }));
+
+    const { error: upsertErr } = await supabaseAdmin
+      .from('inventory')
+      .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id' });
+    if (upsertErr) console.error('[inventoryTransaction] delete system inventory reverse error:', upsertErr);
   }
 
   return { deleted: deleteCount, error: null };

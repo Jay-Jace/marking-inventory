@@ -20,8 +20,9 @@ interface WorkOrderOption {
 }
 
 interface PreviewItem {
-  skuId: string;
+  skuId: string;     // SKU코드 (alphanumeric)
   skuName: string;
+  berrizId: string;  // BERRIZ 숫자형 SKU ID
   qty: number;
 }
 
@@ -30,6 +31,16 @@ interface StepPreviews {
   step2: { adj: PreviewItem[] } | null;
   step3: { mAdj: PreviewItem[]; production: PreviewItem[] } | null;
   step4: { mAdj: PreviewItem[]; cj: PreviewItem[] } | null;
+}
+
+// ── N차 실적 횟수 조회 ──
+async function getActionCount(workOrderId: string, actionType: string): Promise<number> {
+  const { count } = await supabase
+    .from('activity_log')
+    .select('*', { count: 'exact', head: true })
+    .eq('work_order_id', workOrderId)
+    .eq('action_type', actionType);
+  return count || 0;
 }
 
 // ── 컴포넌트 ────────────────────────────────────
@@ -97,7 +108,7 @@ export default function Downloads() {
       const { data: lines, error: linesErr } = await supabase
         .from('work_order_line')
         .select(
-          'id, finished_sku_id, ordered_qty, sent_qty, received_qty, marked_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_id, sku_name)'
+          'id, finished_sku_id, ordered_qty, sent_qty, received_qty, marked_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_id, sku_name, berriz_id)'
         )
         .eq('work_order_id', selectedWoId);
       if (linesErr) throw linesErr;
@@ -110,7 +121,7 @@ export default function Downloads() {
         const { data: bomData, error: bomErr } = await supabase
           .from('bom')
           .select(
-            'finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name)'
+            'finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, berriz_id)'
           )
           .in('finished_sku_id', markingSkuIds);
         if (bomErr) throw bomErr;
@@ -137,16 +148,17 @@ export default function Downloads() {
       }
 
       // ── STEP 1: 이관지시서 + 오프라인 M차감 ──
+      // 작업지시서 주문 수량(ordered_qty) 기준 (sent_qty는 발송확인 시 과다 합산 버그 있음)
       const s1Map: Record<string, PreviewItem> = {};
       for (const line of lineList) {
-        const qty = line.sent_qty > 0 ? line.sent_qty : line.ordered_qty;
+        const qty = line.ordered_qty;
         if (qty <= 0) continue;
         if (line.needs_marking) {
           const boms = bomList.filter((b) => b.finished_sku_id === line.finished_sku_id);
           for (const bom of boms) {
             const key = bom.component_sku_id;
             if (!s1Map[key])
-              s1Map[key] = { skuId: key, skuName: bom.component?.sku_name || key, qty: 0 };
+              s1Map[key] = { skuId: key, skuName: bom.component?.sku_name || key, berrizId: bom.component?.berriz_id || '', qty: 0 };
             s1Map[key].qty += bom.quantity * qty;
           }
         } else {
@@ -155,6 +167,7 @@ export default function Downloads() {
             s1Map[key] = {
               skuId: key,
               skuName: line.finished_sku?.sku_name || key,
+              berrizId: line.finished_sku?.berriz_id || '',
               qty: 0,
             };
           s1Map[key].qty += qty;
@@ -163,33 +176,26 @@ export default function Downloads() {
       const s1Items = Object.values(s1Map);
 
       // ── STEP 2: 제작창고 P증가 (마킹 BOM + 단품 포함) ──
-      // 입고 P증가 = 이관 수량(sent_qty)과 동일해야 함 (보낸 만큼 받음)
-      // received_qty는 이전 버그로 과다 합산된 값이 DB에 남아있어 사용 불가
-      // 단품(needs_marking=false)만 received_qty가 정상이므로 구분 처리
+      // Step 1과 동일하게 ordered_qty 기준 (보낸 만큼 받음)
       const s2Map: Record<string, PreviewItem> = {};
       for (const line of lineList) {
+        const qty = line.ordered_qty;
+        if (qty <= 0) continue;
         if (line.needs_marking) {
-          // 세트: sent_qty 기준 (received_qty는 이전 버그로 부정확)
-          const qty = line.sent_qty > 0 ? line.sent_qty : line.ordered_qty;
-          if (qty <= 0) continue;
           const boms = bomList.filter((b) => b.finished_sku_id === line.finished_sku_id);
           for (const bom of boms) {
             const key = bom.component_sku_id;
             if (!s2Map[key])
-              s2Map[key] = { skuId: key, skuName: bom.component?.sku_name || key, qty: 0 };
+              s2Map[key] = { skuId: key, skuName: bom.component?.sku_name || key, berrizId: bom.component?.berriz_id || '', qty: 0 };
             s2Map[key].qty += bom.quantity * qty;
           }
         } else {
-          // 단품: received_qty 우선, 없으면 sent_qty → ordered_qty 폴백
-          const qty = line.received_qty > 0
-            ? line.received_qty
-            : (line.sent_qty > 0 ? line.sent_qty : line.ordered_qty);
-          if (qty <= 0) continue;
           const key = line.finished_sku_id;
           if (!s2Map[key])
             s2Map[key] = {
               skuId: key,
               skuName: line.finished_sku?.sku_name || key,
+              berrizId: line.finished_sku?.berriz_id || '',
               qty: 0,
             };
           s2Map[key].qty += qty;
@@ -205,19 +211,17 @@ export default function Downloads() {
         const totalMarked = markingTotals[line.id] || 0;
         if (totalMarked <= 0) continue;
 
-        // M차감: BOM 전개 (단품 소모)
         const boms = bomList.filter((b) => b.finished_sku_id === line.finished_sku_id);
         for (const bom of boms) {
           const key = bom.component_sku_id;
           if (!s3MMap[key])
-            s3MMap[key] = { skuId: key, skuName: bom.component?.sku_name || key, qty: 0 };
+            s3MMap[key] = { skuId: key, skuName: bom.component?.sku_name || key, berrizId: bom.component?.berriz_id || '', qty: 0 };
           s3MMap[key].qty += bom.quantity * totalMarked;
         }
 
-        // 생산입고: 완성품 (P타입)
         const key = line.finished_sku_id;
         if (!s3PMap[key])
-          s3PMap[key] = { skuId: key, skuName: line.finished_sku?.sku_name || key, qty: 0 };
+          s3PMap[key] = { skuId: key, skuName: line.finished_sku?.sku_name || key, berrizId: line.finished_sku?.berriz_id || '', qty: 0 };
         s3PMap[key].qty += totalMarked;
       }
 
@@ -229,14 +233,14 @@ export default function Downloads() {
           if (totalMarked <= 0) continue;
           const key = line.finished_sku_id;
           if (!s4Map[key])
-            s4Map[key] = { skuId: key, skuName: line.finished_sku?.sku_name || key, qty: 0 };
+            s4Map[key] = { skuId: key, skuName: line.finished_sku?.sku_name || key, berrizId: line.finished_sku?.berriz_id || '', qty: 0 };
           s4Map[key].qty += totalMarked;
         } else {
           const qty = line.marked_qty > 0 ? line.marked_qty : 0;
           if (qty <= 0) continue;
           const key = line.finished_sku_id;
           if (!s4Map[key])
-            s4Map[key] = { skuId: key, skuName: line.finished_sku?.sku_name || key, qty: 0 };
+            s4Map[key] = { skuId: key, skuName: line.finished_sku?.sku_name || key, berrizId: line.finished_sku?.berriz_id || '', qty: 0 };
           s4Map[key].qty += qty;
         }
       }
@@ -260,24 +264,28 @@ export default function Downloads() {
   const selectedWo = workOrders.find((w) => w.id === selectedWoId);
   const date = selectedWo?.download_date || new Date().toISOString().split('T')[0];
 
-  const handleDownloadStep1 = () => {
+  const handleDownloadStep1 = async () => {
     if (!previews.step1 || previews.step1.transfer.length === 0) return;
     setDownloading(true);
     try {
       const offlineWh = warehouses['오프라인샵'];
       const playwithWh = warehouses['플레이위즈'];
+      const nCount = await getActionCount(selectedWoId, 'shipment_confirm');
+      const yymmdd = date.slice(2); // YYYY-MM-DD → YY-MM-DD
       const transferLines: TransferLine[] = previews.step1.transfer.map((p) => ({
         skuId: p.skuId,
         skuName: p.skuName,
         quantity: p.qty,
       }));
       const adjLines: InventoryAdjLine[] = previews.step1.adj.map((p) => ({
-        warehouseId: offlineWh?.external_id || offlineWh?.id || '오프라인샵',
-        skuId: p.skuId,
-        skuName: p.skuName,
+        skuId: p.berrizId || p.skuId,
+        warehouseId: '305852852048384',
         quantity: p.qty,
         code: 'M' as const,
         reason: 'ETC',
+        memo: `${yymmdd} 오프라인 ${nCount}차 출고분`,
+        skuCode: p.skuId,
+        skuName: p.skuName,
       }));
       exportAllForms({
         transferLines,
@@ -293,18 +301,21 @@ export default function Downloads() {
     }
   };
 
-  const handleDownloadStep2 = () => {
+  const handleDownloadStep2 = async () => {
     if (!previews.step2 || previews.step2.adj.length === 0) return;
     setDownloading(true);
     try {
-      const playwithWh = warehouses['플레이위즈'];
+      const nCount = await getActionCount(selectedWoId, 'receipt_check');
+      const yymmdd = date.slice(2); // YYYY-MM-DD → YY-MM-DD
       const adjLines: InventoryAdjLine[] = previews.step2.adj.map((p) => ({
-        warehouseId: playwithWh?.external_id || playwithWh?.id || '플레이위즈',
-        skuId: p.skuId,
-        skuName: p.skuName,
+        skuId: p.berrizId || p.skuId,
+        warehouseId: '303310368831744',
         quantity: p.qty,
         code: 'P' as const,
         reason: 'ETC',
+        memo: `${yymmdd} 플레이위즈 ${nCount}차 입고분`,
+        skuCode: p.skuId,
+        skuName: p.skuName,
       }));
       exportInventoryAdjustment(adjLines, date, '제작창고P증가');
     } catch {
@@ -324,19 +335,21 @@ export default function Downloads() {
 
       if (previews.step3.mAdj.length > 0) {
         const mAdjLines: InventoryAdjLine[] = previews.step3.mAdj.map((p) => ({
-          warehouseId: playwithWh?.external_id || playwithWh?.id || '플레이위즈',
-          skuId: p.skuId,
-          skuName: p.skuName,
+          skuId: p.berrizId || p.skuId,
+          warehouseId: '303310368831744',
           quantity: p.qty,
           code: 'M' as const,
           reason: 'ETC',
+          memo: '마킹 단품 소모',
+          skuCode: p.skuId,
+          skuName: p.skuName,
         }));
         exportInventoryAdjustment(mAdjLines, today, '제작창고M차감_단품소모');
       }
 
       if (previews.step3.production.length > 0) {
         const productionLines: CjReceiptLine[] = previews.step3.production.map((p) => ({
-          deliveryWarehouseId: cjWh?.external_id || cjWh?.id || 'CJ창고',
+          deliveryWarehouseId: '303310368831744',
           skuId: p.skuId,
           skuName: p.skuName,
           quantity: p.qty,
@@ -362,12 +375,14 @@ export default function Downloads() {
 
       if (previews.step4.mAdj.length > 0) {
         const mAdjLines: InventoryAdjLine[] = previews.step4.mAdj.map((p) => ({
-          warehouseId: playwithWh?.external_id || playwithWh?.id || '플레이위즈',
-          skuId: p.skuId,
-          skuName: p.skuName,
+          skuId: p.berrizId || p.skuId,
+          warehouseId: '303310368831744',
           quantity: p.qty,
           code: 'M' as const,
           reason: 'ETC',
+          memo: '플레이위즈 출고',
+          skuCode: p.skuId,
+          skuName: p.skuName,
         }));
         exportInventoryAdjustment(mAdjLines, today, '플레이위즈M차감_출고');
       }
@@ -393,7 +408,7 @@ export default function Downloads() {
   // ── 단계별 설정 ──
 
   const step1Available = selectedWo
-    ? ['이관준비', '이관중', '입고확인완료', '마킹중', '마킹완료', '출고완료'].includes(selectedWo.status)
+    ? ['이관중', '입고확인완료', '마킹중', '마킹완료', '출고완료'].includes(selectedWo.status)
     : false;
   const step2Available = selectedWo
     ? ['입고확인완료', '마킹중', '마킹완료', '출고완료'].includes(selectedWo.status)
@@ -411,7 +426,7 @@ export default function Downloads() {
       label: 'STEP 1',
       title: '오프라인 발송 확인 후',
       available: step1Available,
-      pendingMsg: '작업지시서 업로드 후 활성화됩니다',
+      pendingMsg: '오프라인 발송 확인 후 활성화됩니다',
       items: [
         { num: '①', name: '이관지시서 (오프라인→플레이위즈)' },
         { num: '②', name: '재고조정양식 (오프라인샵 M차감)' },

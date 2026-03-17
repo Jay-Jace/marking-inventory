@@ -9,6 +9,7 @@ interface ParseResult {
   markingLines: RawOrderLine[];
   nonMarkingLines: RawOrderLine[];
   downloadDate: string;
+  berrizIdMap: Record<string, string>;
 }
 
 export default function WorkOrderUpload() {
@@ -42,6 +43,7 @@ export default function WorkOrderUpload() {
         markingLines,
         nonMarkingLines,
         downloadDate: parsed.downloadDate,
+        berrizIdMap: parsed.berrizIdMap,
       });
     } catch (err: any) {
       setError(err.message || '파일 파싱 중 오류가 발생했습니다.');
@@ -91,10 +93,23 @@ export default function WorkOrderUpload() {
         sku_id: l.skuId,
         sku_name: l.skuName,
         barcode: l.barcode || null,
+        berriz_id: l.berrizId || null,
         type: '완제품',
       }));
 
-      await supabase.from('sku').upsert(skuUpserts, { onConflict: 'sku_id', ignoreDuplicates: true });
+      await supabase.from('sku').upsert(skuUpserts, { onConflict: 'sku_id' });
+
+      // 단품(유니폼+마킹) berriz_id 업데이트 (이관지시서 시트에서 추출)
+      if (result.berrizIdMap) {
+        const entries = Object.entries(result.berrizIdMap);
+        for (const [code, berrizId] of entries) {
+          await supabase
+            .from('sku')
+            .update({ berriz_id: berrizId })
+            .eq('sku_id', code)
+            .is('berriz_id', null); // berriz_id가 없는 경우에만 업데이트
+        }
+      }
 
       // 3. 작업지시서 라인 생성
       setSaveProgress({ current: 3, total: 4, step: `라인 등록 중... (${result.lines.length}건)` });

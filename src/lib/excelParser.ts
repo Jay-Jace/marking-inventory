@@ -6,6 +6,7 @@ export interface ParsedWorkOrder {
   downloadDate: string;
   lines: RawOrderLine[];
   markingSkuCodes: string[]; // "유니폼 제작 필요" 시트의 완제품 SKU코드 목록
+  berrizIdMap: Record<string, string>; // SKU코드 → BERRIZ 숫자형 SKU ID 매핑
 }
 
 export interface RawOrderLine {
@@ -21,6 +22,7 @@ export interface RawOrderLine {
   skuCode: string;
   barcode: string;
   skuId: string;
+  berrizId: string; // BERRIZ 숫자형 SKU ID (출고수량 시트 L열)
   quantity: number;
 }
 
@@ -72,13 +74,23 @@ export function parseWorkOrderExcel(file: File, onProgress?: ProgressCallback): 
             skuCode: String(row[9] || ''),
             barcode: String(row[10] || ''),
             skuId: String(row[9] || ''),   // SKU 코드 (alphanumeric, BOM과 매핑용)
+            berrizId: String(row[11] || ''), // BERRIZ 숫자형 SKU ID
             quantity: Number(row[12]) || 0,
           });
         }
 
-        // "유니폼 제작 필요" 시트에서 마킹 필요 SKU코드 추출
+        // "유니폼 제작 필요" 시트에서 마킹 필요 SKU코드 + BERRIZ ID 추출
         onProgress?.({ current: 3, total: 3, step: '마킹 필요 항목 분류 중...' });
         const markingSkuCodes: string[] = [];
+        const berrizIdMap: Record<string, string> = {};
+
+        // 출고수량 시트에서 완제품 berrizId 매핑
+        for (const line of lines) {
+          if (line.skuId && line.berrizId) {
+            berrizIdMap[line.skuId] = line.berrizId;
+          }
+        }
+
         const markingSheetName = workbook.SheetNames.find((n) => n.includes('유니폼 제작 필요'));
         if (markingSheetName) {
           const markingSheet = workbook.Sheets[markingSheetName];
@@ -88,11 +100,28 @@ export function parseWorkOrderExcel(file: File, onProgress?: ProgressCallback): 
           });
           for (let i = 1; i < markingRows.length; i++) {
             const code = String(markingRows[i][1] || '').trim();
+            const bid = String(markingRows[i][3] || '').trim();
             if (code) markingSkuCodes.push(code);
+            if (code && bid) berrizIdMap[code] = bid;
           }
         }
 
-        resolve({ downloadDate, lines, markingSkuCodes });
+        // "이관지시서" 시트에서 단품(유니폼+마킹) BERRIZ ID 매핑
+        const transferSheetName = workbook.SheetNames.find((n) => n.includes('이관지시서'));
+        if (transferSheetName) {
+          const transferSheet = workbook.Sheets[transferSheetName];
+          const transferRows: string[][] = XLSX.utils.sheet_to_json(transferSheet, {
+            header: 1,
+            defval: '',
+          });
+          for (let i = 1; i < transferRows.length; i++) {
+            const code = String(transferRows[i][0] || '').trim(); // A열: SKU코드
+            const bid = String(transferRows[i][3] || '').trim();  // D열: SKU ID
+            if (code && bid) berrizIdMap[code] = bid;
+          }
+        }
+
+        resolve({ downloadDate, lines, markingSkuCodes, berrizIdMap });
       } catch (err) {
         reject(err);
       }

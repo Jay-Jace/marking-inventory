@@ -127,7 +127,7 @@ export default function InventoryManage() {
           warehouseId: warehouseId!,
           skuId: row.sku_id,
           txType: '재고조정',
-          quantity: Math.abs(diff),
+          quantity: diff,
           source: 'manual',
           memo: `재고수정: ${row.quantity} → ${editQty}`,
         });

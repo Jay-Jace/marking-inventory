@@ -5,6 +5,7 @@ export interface Sku {
   sku_name: string;
   barcode: string | null;
   type: SkuType;
+  berriz_id?: string | null;
 }
 
 export interface BomItem {
@@ -79,7 +80,7 @@ export interface AppUser {
   name: string;
 }
 
-export type TxType = '입고' | '출고' | '반품' | '재고조정';
+export type TxType = '입고' | '출고' | '반품' | '재고조정' | '마킹출고' | '마킹입고';
 export type TxSource = 'cj_excel' | 'system' | 'manual';
 
 export interface InventoryTransaction {
@@ -96,7 +97,7 @@ export interface InventoryTransaction {
   sku?: Sku;
 }
 
-export type ActionType = 'shipment_confirm' | 'receipt_check' | 'marking_work' | 'shipment_out' | 'shipment_cancel_request' | 'shipment_cancel_approved' | 'shipment_modify_request' | 'shipment_modify_approved';
+export type ActionType = 'shipment_confirm' | 'receipt_check' | 'marking_work' | 'shipment_out' | 'shipment_cancel_request' | 'shipment_cancel_approved' | 'shipment_modify_request' | 'shipment_modify_approved' | 'delete_shipment' | 'delete_receipt' | 'delete_marking' | 'delete_shipment_out' | 'rollback_shipment' | 'rollback_receipt' | 'rollback_marking' | 'rollback_shipment_out';
 
 export interface ActivityLog {
   id: string;

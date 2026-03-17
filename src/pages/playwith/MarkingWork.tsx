@@ -1,6 +1,6 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
-import { recordTransaction } from '../../lib/inventoryTransaction';
+import { recordTransaction, deleteSystemTransactions } from '../../lib/inventoryTransaction';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
@@ -12,7 +12,9 @@ import {
   ChevronRight,
   Clock,
   Download,
+  Eye,
   FileUp,
+  Trash2,
 } from 'lucide-react';
 
 // ── 인터페이스 ──────────────────────────────────
@@ -70,7 +72,19 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   // BOM 맵: finishedSkuId → [{ componentSkuId, quantity }]
   const [bomMap, setBomMap] = useState<Record<string, { componentSkuId: string; quantity: number }[]>>({});
 
+  // 내일 날짜 계산
+  const tomorrowDate = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    return d.toISOString().split('T')[0];
+  })();
   const isToday = selectedDate === today;
+  const isTomorrow = selectedDate === tomorrowDate;
+
+  // 이력 삭제
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deletePreview, setDeletePreview] = useState<{ lineId: string; skuName: string; qty: number }[]>([]);
 
   useEffect(() => {
     loadOrders();
@@ -197,11 +211,14 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     const d = new Date(selectedDate);
     d.setDate(d.getDate() + offset);
     const newDate = d.toISOString().split('T')[0];
-    // 미래 날짜 방지
-    if (newDate > today) return;
+    // 내일까지만 허용
+    if (newDate > tomorrowDate) return;
     setSelectedDate(newDate);
     if (newDate === today) {
       // 오늘로 돌아오면 작업 모드
+      setHistoryItems([]);
+    } else if (newDate === tomorrowDate) {
+      // 내일 → 이월 미리보기 (loadHistory는 호출하지 않음)
       setHistoryItems([]);
     } else {
       // 과거 날짜 → 이력 조회
@@ -410,7 +427,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
               await recordTransaction({
                 warehouseId: pwWhId,
                 skuId: comp.componentSkuId,
-                txType: '출고',
+                txType: '마킹출고',
                 quantity: deltaQty,
                 source: 'system',
                 memo: `마킹작업 구성품 차감 (${item.finishedSkuId})`,
@@ -439,7 +456,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             await recordTransaction({
               warehouseId: pwWhId,
               skuId: item.finishedSkuId,
-              txType: '입고',
+              txType: '마킹입고',
               quantity: diff,
               source: 'system',
               memo: `마킹작업 완성품 증가`,
@@ -493,6 +510,155 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     } finally {
       setSaving(false);
       setSaveProgress(null);
+    }
+  };
+
+  // ── 마킹 실적 삭제 ──
+
+  const prepareDeleteMarking = () => {
+    // 현재 이력에서 삭제 미리보기 생성
+    setDeletePreview(historyItems.map((h) => ({ lineId: h.lineId, skuName: h.skuName, qty: h.completedQty })));
+    setShowDeleteModal(true);
+  };
+
+  const handleDeleteMarking = async () => {
+    if (!selectedOrder || deletePreview.length === 0) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      const { data: pwWarehouse } = await supabase
+        .from('warehouse')
+        .select('id')
+        .eq('name', '플레이위즈')
+        .maybeSingle();
+      const pwWhId = (pwWarehouse as any)?.id;
+
+      for (const item of deletePreview) {
+        // 1) daily_marking 해당 날짜 레코드 조회
+        const { data: dailyRecord } = await supabase
+          .from('daily_marking')
+          .select('id, completed_qty')
+          .eq('date', selectedDate)
+          .eq('work_order_line_id', item.lineId)
+          .maybeSingle();
+        if (!dailyRecord) continue;
+
+        const qty = (dailyRecord as any).completed_qty;
+
+        // 2) work_order_line.marked_qty 차감
+        const { data: lineData } = await supabase
+          .from('work_order_line')
+          .select('marked_qty, finished_sku_id')
+          .eq('id', item.lineId)
+          .maybeSingle();
+        if (lineData) {
+          const newMarkedQty = Math.max(0, ((lineData as any).marked_qty || 0) - qty);
+          await supabase
+            .from('work_order_line')
+            .update({ marked_qty: newMarkedQty })
+            .eq('id', item.lineId);
+        }
+
+        // 3) BOM 기반: 구성품 재고 복원(+), 완성품 재고 차감(-)
+        if (pwWhId && lineData) {
+          const finSkuId = (lineData as any).finished_sku_id;
+          const components = bomMap[finSkuId] || [];
+
+          // 구성품 재고 복원 (입고)
+          for (const comp of components) {
+            const deltaQty = comp.quantity * qty;
+            const { data: compInv } = await supabase
+              .from('inventory')
+              .select('quantity')
+              .eq('warehouse_id', pwWhId)
+              .eq('sku_id', comp.componentSkuId)
+              .maybeSingle();
+            const newQty = ((compInv as any)?.quantity || 0) + deltaQty;
+            await supabase
+              .from('inventory')
+              .upsert({ warehouse_id: pwWhId, sku_id: comp.componentSkuId, quantity: newQty }, { onConflict: 'warehouse_id,sku_id' });
+          }
+
+          // 완성품 재고 차감 (출고)
+          const { data: finInv } = await supabase
+            .from('inventory')
+            .select('quantity')
+            .eq('warehouse_id', pwWhId)
+            .eq('sku_id', finSkuId)
+            .maybeSingle();
+          const newFinQty = Math.max(0, ((finInv as any)?.quantity || 0) - qty);
+          await supabase
+            .from('inventory')
+            .upsert({ warehouse_id: pwWhId, sku_id: finSkuId, quantity: newFinQty }, { onConflict: 'warehouse_id,sku_id' });
+        }
+
+        // 4) 관련 inventory_transaction 삭제 (구성품 출고 + 완성품 입고)
+        if (pwWhId && lineData) {
+          const finSkuId = (lineData as any).finished_sku_id;
+          // 구성품 차감 트랜잭션 삭제
+          await deleteSystemTransactions({
+            warehouseId: pwWhId,
+            memo: `마킹작업 구성품 차감 (${finSkuId})`,
+          });
+          // 완성품 증가 트랜잭션 삭제
+          await deleteSystemTransactions({
+            warehouseId: pwWhId,
+            memo: `마킹작업 완성품 증가`,
+          });
+        }
+
+        // 5) daily_marking 레코드 삭제
+        await supabase
+          .from('daily_marking')
+          .delete()
+          .eq('id', (dailyRecord as any).id);
+      }
+
+      // 6) work_order 상태 체크 (마킹중이었는지)
+      const { data: woCheck } = await supabase
+        .from('work_order')
+        .select('status')
+        .eq('id', selectedOrder.id)
+        .maybeSingle();
+      if ((woCheck as any)?.status === '마킹중' || (woCheck as any)?.status === '마킹완료') {
+        // 다시 마킹 시작 전 상태인지 체크
+        const { data: remainingMarkings } = await supabase
+          .from('daily_marking')
+          .select('id')
+          .in('work_order_line_id', allLineIds)
+          .limit(1);
+        if (!remainingMarkings || remainingMarkings.length === 0) {
+          // 마킹 기록이 없으면 입고확인완료로 복원
+          await supabase
+            .from('work_order')
+            .update({ status: '입고확인완료' })
+            .eq('id', selectedOrder.id);
+        }
+      }
+
+      // 7) activity_log 기록
+      await supabase.from('activity_log').insert({
+        user_id: currentUser.id,
+        action_type: 'delete_marking',
+        work_order_id: selectedOrder.id,
+        action_date: today,
+        summary: {
+          items: deletePreview.map((h) => ({ skuName: h.skuName, completedQty: h.qty })),
+          totalQty: deletePreview.reduce((s, h) => s + h.qty, 0),
+          workOrderDate: selectedOrder.download_date,
+          deletedDate: selectedDate,
+        },
+      });
+
+      // 8) UI 초기화
+      setHistoryItems([]);
+      setShowDeleteModal(false);
+      setDeletePreview([]);
+      loadOrders();
+    } catch (e: any) {
+      setError(`삭제 실패: ${e.message || '알 수 없는 오류'}`);
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -611,13 +777,15 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             <p className="text-sm font-semibold text-gray-900">{formatDate(selectedDate)}</p>
             {isToday ? (
               <span className="text-xs text-blue-600 font-medium">오늘 — 작업 모드</span>
+            ) : isTomorrow ? (
+              <span className="text-xs text-orange-600 font-medium">내일 — 이월 미리보기 (읽기 전용)</span>
             ) : (
               <span className="text-xs text-gray-400">이력 조회 (읽기 전용)</span>
             )}
           </div>
           <button
             onClick={() => changeDate(1)}
-            disabled={isToday}
+            disabled={isTomorrow}
             className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-500 disabled:opacity-30 disabled:cursor-not-allowed"
           >
             <ChevronRight size={18} />
@@ -625,8 +793,65 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         </div>
       </div>
 
+      {/* ── 내일 이월 미리보기 모드 ── */}
+      {isTomorrow && (
+        <div className="bg-white rounded-xl shadow-sm border border-orange-200 overflow-hidden">
+          <div className="px-5 py-4 border-b border-orange-100 bg-orange-50">
+            <div className="flex items-center gap-2">
+              <Eye size={16} className="text-orange-600" />
+              <h3 className="font-medium text-orange-800">내일 이월 미리보기</h3>
+            </div>
+            <p className="text-xs text-orange-500 mt-0.5">아직 마킹이 완료되지 않은 항목이 내일 자동으로 표시됩니다</p>
+          </div>
+
+          {items.length === 0 ? (
+            <div className="px-5 py-8 text-center text-gray-400 text-sm">
+              이월될 작업이 없습니다 — 모든 마킹이 완료되었습니다
+            </div>
+          ) : (
+            <>
+              <div className="divide-y divide-gray-50">
+                {items.map((item) => (
+                  <div key={item.lineId} className="px-5 py-3.5 flex items-center gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium text-gray-900 truncate">{item.skuName}</p>
+                        {item.isCarryOver && (
+                          <span className="text-[10px] px-1.5 py-0.5 bg-orange-100 text-orange-600 rounded-full">이월</span>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        누적완료 {item.markedQty}개 / 주문 {item.orderedQty}개
+                      </p>
+                    </div>
+                    <p className="text-sm font-semibold text-orange-700 flex-shrink-0">
+                      잔여 {item.remainingQty}개
+                    </p>
+                  </div>
+                ))}
+              </div>
+              <div className="px-5 py-3 bg-orange-50 border-t border-orange-100 flex items-center justify-between">
+                <p className="text-sm text-orange-600">이월 예정 총 잔여:</p>
+                <p className="text-sm font-bold text-orange-800">
+                  {items.reduce((s, i) => s + i.remainingQty, 0)}개 ({items.length}건)
+                </p>
+              </div>
+            </>
+          )}
+
+          <div className="px-5 py-3 bg-blue-50 border-t border-blue-100 text-center">
+            <button
+              onClick={() => { setSelectedDate(today); setHistoryItems([]); }}
+              className="text-sm text-blue-600 font-medium hover:underline"
+            >
+              오늘 작업으로 돌아가기
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── 이력 조회 모드 (과거 날짜) ── */}
-      {!isToday && (
+      {!isToday && !isTomorrow && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
           <div className="px-5 py-4 border-b border-gray-100 bg-gray-50">
             <h3 className="font-medium text-gray-700">
@@ -664,6 +889,19 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             </>
           )}
 
+          {/* 삭제 버튼 (마킹중 상태일 때만) */}
+          {historyItems.length > 0 && (
+            <div className="px-5 py-3 bg-red-50 border-t border-red-100">
+              <button
+                onClick={prepareDeleteMarking}
+                className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-red-500 text-white rounded-lg text-sm font-medium hover:bg-red-600 transition-colors"
+              >
+                <Trash2 size={16} />
+                이 날짜 마킹 실적 삭제
+              </button>
+            </div>
+          )}
+
           <div className="px-5 py-3 bg-blue-50 border-t border-blue-100 text-center">
             <button
               onClick={() => { setSelectedDate(today); setHistoryItems([]); }}
@@ -671,6 +909,47 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             >
               오늘 작업으로 돌아가기
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* 마킹 삭제 확인 모달 */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full overflow-hidden">
+            <div className="px-6 py-5 border-b border-gray-100">
+              <h3 className="text-lg font-bold text-gray-900">마킹 실적 삭제</h3>
+              <p className="text-sm text-gray-500 mt-1">이 작업은 되돌릴 수 없습니다</p>
+            </div>
+            <div className="px-6 py-4 space-y-3">
+              <div className="bg-red-50 rounded-lg p-3">
+                <p className="text-sm text-red-700 font-medium">삭제 시 다음이 함께 처리됩니다:</p>
+                <ul className="text-xs text-red-600 mt-2 space-y-1">
+                  <li>• 마킹 완료 수량 차감 (marked_qty 감소)</li>
+                  <li>• BOM 구성품 재고 복원 + 완성품 재고 차감</li>
+                  <li>• 관련 수불부 트랜잭션 삭제</li>
+                  <li>• daily_marking 레코드 삭제</li>
+                </ul>
+              </div>
+              <div className="text-sm text-gray-600">
+                <p>삭제 날짜: <span className="font-medium">{formatDate(selectedDate)}</span></p>
+                <p>삭제 대상: <span className="font-medium">{deletePreview.length}종 / {deletePreview.reduce((s, h) => s + h.qty, 0)}개</span></p>
+              </div>
+              <div className="max-h-40 overflow-y-auto bg-gray-50 rounded-lg p-2">
+                {deletePreview.map((d, idx) => (
+                  <div key={idx} className="flex justify-between text-xs py-1">
+                    <span className="text-gray-600 truncate flex-1 mr-2">{d.skuName}</span>
+                    <span className="text-red-600 font-medium">{d.qty}개</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex gap-3">
+              <button onClick={() => setShowDeleteModal(false)} disabled={deleting} className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50">취소</button>
+              <button onClick={handleDeleteMarking} disabled={deleting} className="flex-1 py-2.5 bg-red-500 text-white rounded-lg text-sm font-medium hover:bg-red-600 transition-colors disabled:opacity-50">
+                {deleting ? '삭제 중...' : '삭제 확인'}
+              </button>
+            </div>
           </div>
         </div>
       )}

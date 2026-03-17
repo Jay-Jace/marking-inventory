@@ -1,18 +1,18 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
-import { Package, ClipboardList, Trash2, AlertTriangle, CheckCircle, XCircle, Eye } from 'lucide-react';
-
-interface InventorySummary {
-  warehouseName: string;
-  totalSkus: number;
-  totalQty: number;
-}
-
-interface InventoryItem {
-  skuName: string;
-  skuType: string;
-  quantity: number;
-}
+import { Trash2, AlertTriangle, CheckCircle, XCircle, Eye, RotateCcw, Settings } from 'lucide-react';
+import {
+  getSteps,
+  getStepStates,
+  getRollbackableStep,
+  getRollbackDescription,
+  executeRollback,
+  deleteWorkOrderCompletely,
+  getMarkingSessions,
+  type MarkingSession,
+  type ProgressCallback,
+} from '../../lib/workOrderRollback';
+import type { WorkOrderStatus } from '../../types';
 
 interface ActiveOrder {
   id: string;
@@ -33,8 +33,6 @@ interface RequestDetail {
 }
 
 export default function Dashboard() {
-  const [inventories, setInventories] = useState<InventorySummary[]>([]);
-  const [offlineItems, setOfflineItems] = useState<InventoryItem[]>([]);
   const [activeOrders, setActiveOrders] = useState<ActiveOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -46,6 +44,17 @@ export default function Dashboard() {
   const [approving, setApproving] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
+  // 롤백 관리 모달
+  const [manageOrder, setManageOrder] = useState<{ id: string; date: string; status: WorkOrderStatus } | null>(null);
+  const [rollbackConfirm, setRollbackConfirm] = useState(false);
+  const [rolling, setRolling] = useState(false);
+  const [rollbackProgress, setRollbackProgress] = useState<{ current: number; total: number; step: string } | null>(null);
+
+  // 마킹 세션 (날짜/시점별 롤백용)
+  const [markingSessions, setMarkingSessions] = useState<MarkingSession[]>([]);
+  const [selectedSessions, setSelectedSessions] = useState<Set<string>>(new Set());
+  const [rollbackMode, setRollbackMode] = useState<'all' | 'select'>('all');
+
   useEffect(() => {
     loadData();
   }, []);
@@ -54,34 +63,6 @@ export default function Dashboard() {
     setLoading(true);
     setError(null);
     try {
-      // 창고별 재고 요약
-      const { data: invData, error: invError } = await supabase
-        .from('inventory')
-        .select('quantity, warehouse(name), sku(sku_name, type)')
-        .gt('quantity', 0);
-      if (invError) throw invError;
-
-      if (invData) {
-        const summary: Record<string, InventorySummary> = {};
-        const offItems: InventoryItem[] = [];
-        for (const row of invData as any[]) {
-          const name = row.warehouse?.name || '알 수 없음';
-          if (!summary[name]) summary[name] = { warehouseName: name, totalSkus: 0, totalQty: 0 };
-          summary[name].totalSkus++;
-          summary[name].totalQty += row.quantity;
-          if (name === '오프라인샵' && row.sku) {
-            offItems.push({
-              skuName: row.sku.sku_name || '이름 없음',
-              skuType: row.sku.type || '기타',
-              quantity: row.quantity,
-            });
-          }
-        }
-        setInventories(Object.values(summary));
-        offItems.sort((a, b) => b.quantity - a.quantity);
-        setOfflineItems(offItems);
-      }
-
       // 진행 중인 작업지시서
       const { data: woData, error: woError } = await supabase
         .from('work_order')
@@ -109,26 +90,89 @@ export default function Dashboard() {
     }
   };
 
-  const handleDelete = async (workOrderId: string) => {
+  const handleDelete = async (wo: ActiveOrder) => {
     setDeleting(true);
+    setRollbackProgress(null);
+    setError(null);
     try {
-      // 1. daily_marking 삭제
-      const { data: lines } = await supabase
-        .from('work_order_line')
-        .select('id')
-        .eq('work_order_id', workOrderId);
-      const lineIds = (lines || []).map((l: any) => l.id);
-      if (lineIds.length > 0) {
-        await supabase.from('daily_marking').delete().in('work_order_line_id', lineIds);
+      const { data: { user } } = await supabase.auth.getUser();
+      const userId = user?.id || '';
+      const onProgress: ProgressCallback = (current, total, step) => {
+        setRollbackProgress({ current, total, step });
+      };
+      const result = await deleteWorkOrderCompletely(
+        wo.id, wo.downloadDate, wo.status as any, userId, onProgress
+      );
+      if (!result.success) {
+        setError(result.error || '삭제 실패');
       }
-      // 2. work_order_line 삭제
-      await supabase.from('work_order_line').delete().eq('work_order_id', workOrderId);
-      // 3. work_order 삭제
-      await supabase.from('work_order').delete().eq('id', workOrderId);
       await loadData();
+    } catch (e: any) {
+      setError(`삭제 실패: ${e.message}`);
     } finally {
       setDeleting(false);
       setConfirmId(null);
+      setRollbackProgress(null);
+    }
+  };
+
+  // ── 롤백 실행 ──
+  const loadMarkingSessions = async (woId: string) => {
+    const sessions = await getMarkingSessions(woId);
+    setMarkingSessions(sessions);
+    setSelectedSessions(new Set());
+    setRollbackMode('all');
+  };
+
+  const handleRollback = async () => {
+    if (!manageOrder) return;
+    const step = getRollbackableStep(manageOrder.status);
+    if (!step) return;
+    setRolling(true);
+    setRollbackProgress(null);
+    setError(null);
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      const userId = user?.id || '';
+      const onProgress: ProgressCallback = (current, total, stepName) => {
+        setRollbackProgress({ current, total, step: stepName });
+      };
+
+      if (step === '마킹' && rollbackMode === 'select' && selectedSessions.size > 0) {
+        // 선택한 날짜들을 순차 롤백
+        const dates = [...selectedSessions];
+        for (let i = 0; i < dates.length; i++) {
+          const dateProgress: ProgressCallback = (current, total, stepName) => {
+            setRollbackProgress({
+              current: i * total + current,
+              total: dates.length * total,
+              step: `[${dates[i]}] ${stepName}`,
+            });
+          };
+          const result = await executeRollback(step, manageOrder.id, manageOrder.date, userId, dateProgress, dates[i]);
+          if (!result.success) {
+            setError(result.error || '롤백 실패');
+            return;
+          }
+        }
+      } else {
+        const result = await executeRollback(step, manageOrder.id, manageOrder.date, userId, onProgress);
+        if (!result.success) {
+          setError(result.error || '롤백 실패');
+          return;
+        }
+      }
+      setSuccessMsg(`${step} 롤백이 완료되었습니다.`);
+      setManageOrder(null);
+      setRollbackConfirm(false);
+      setMarkingSessions([]);
+      setSelectedSessions(new Set());
+      loadData();
+    } catch (e: any) {
+      setError(`롤백 실패: ${e.message}`);
+    } finally {
+      setRolling(false);
+      setRollbackProgress(null);
     }
   };
 
@@ -359,11 +403,6 @@ export default function Dashboard() {
     출고완료: 'bg-emerald-100 text-emerald-700',
   };
 
-  const warehouseIcon: Record<string, React.ReactNode> = {
-    오프라인샵: <Package size={20} className="text-blue-600" />,
-    플레이위즈: <ClipboardList size={20} className="text-purple-600" />,
-  };
-
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64 text-gray-500">
@@ -398,99 +437,6 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* 창고별 재고 현황 */}
-      <div>
-        <h3 className="text-sm font-semibold text-gray-600 uppercase tracking-wide mb-3">
-          창고별 재고 현황
-        </h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {/* 오프라인샵 카드: 유니폼/마킹 상품명 목록 */}
-          {(() => {
-            const data = inventories.find((i) => i.warehouseName === '오프라인샵');
-            const uniforms = offlineItems.filter((i) => i.skuType === '유니폼단품');
-            const markings = offlineItems.filter((i) => i.skuType === '마킹단품');
-            const uniformTotal = uniforms.reduce((s, i) => s + i.quantity, 0);
-            const markingTotal = markings.reduce((s, i) => s + i.quantity, 0);
-            return (
-              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-3">
-                    {warehouseIcon['오프라인샵']}
-                    <span className="font-medium text-gray-900">오프라인샵</span>
-                  </div>
-                  {data && (
-                    <span className="text-lg font-bold text-gray-900">총 {data.totalQty.toLocaleString()}개</span>
-                  )}
-                </div>
-                {!data ? (
-                  <p className="text-gray-400 text-sm">재고 없음</p>
-                ) : (
-                  <div className="space-y-3">
-                    {/* 유니폼 */}
-                    <div>
-                      <p className="text-xs font-semibold text-blue-600 mb-1.5">
-                        👕 유니폼 ({uniforms.length}종 · {uniformTotal.toLocaleString()}개)
-                      </p>
-                      {uniforms.length > 0 ? (
-                        <div className="space-y-1">
-                          {uniforms.map((item) => (
-                            <div key={item.skuName} className="flex items-center justify-between bg-blue-50 rounded-lg px-3 py-1.5">
-                              <span className="text-xs text-gray-800 truncate">{item.skuName}</span>
-                              <span className="text-xs font-semibold text-gray-700 flex-shrink-0 ml-2">{item.quantity.toLocaleString()}개</span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="text-xs text-gray-400 pl-1">없음</p>
-                      )}
-                    </div>
-                    {/* 마킹 */}
-                    <div>
-                      <p className="text-xs font-semibold text-purple-600 mb-1.5">
-                        🏷️ 마킹 ({markings.length}종 · {markingTotal.toLocaleString()}개)
-                      </p>
-                      {markings.length > 0 ? (
-                        <div className="space-y-1">
-                          {markings.map((item) => (
-                            <div key={item.skuName} className="flex items-center justify-between bg-purple-50 rounded-lg px-3 py-1.5">
-                              <span className="text-xs text-gray-800 truncate">{item.skuName}</span>
-                              <span className="text-xs font-semibold text-gray-700 flex-shrink-0 ml-2">{item.quantity.toLocaleString()}개</span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <p className="text-xs text-gray-400 pl-1">없음</p>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-
-          {/* 플레이위즈 카드: 기존 요약 유지 */}
-          {(() => {
-            const data = inventories.find((i) => i.warehouseName === '플레이위즈');
-            return (
-              <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100">
-                <div className="flex items-center gap-3 mb-3">
-                  {warehouseIcon['플레이위즈']}
-                  <span className="font-medium text-gray-900">플레이위즈</span>
-                </div>
-                {data ? (
-                  <>
-                    <p className="text-2xl font-bold text-gray-900">{data.totalQty.toLocaleString()}개</p>
-                    <p className="text-sm text-gray-500">{data.totalSkus}개 SKU</p>
-                  </>
-                ) : (
-                  <p className="text-gray-400 text-sm">재고 없음</p>
-                )}
-              </div>
-            );
-          })()}
-        </div>
-      </div>
-
       {/* 진행 중인 작업지시서 */}
       <div>
         <h3 className="text-sm font-semibold text-gray-600 uppercase tracking-wide mb-3">
@@ -518,18 +464,32 @@ export default function Dashboard() {
                       <td colSpan={4} className="px-4 py-3">
                         <div className="flex items-center gap-3">
                           <AlertTriangle size={15} className="text-red-500 flex-shrink-0" />
-                          <span className="text-sm text-red-800">
-                            <span className="font-semibold">{wo.downloadDate}</span>
-                            {' '}작업지시서를 삭제할까요?{' '}
-                            <span
-                              className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                                statusColor[wo.status] || 'bg-gray-100 text-gray-700'
-                              }`}
-                            >
-                              현재 상태: {wo.status}
-                            </span>
-                            {' '}— 연관 데이터가 모두 삭제됩니다.
-                          </span>
+                          <div className="flex-1">
+                            {deleting && rollbackProgress ? (
+                              <div className="space-y-1">
+                                <p className="text-xs text-red-700 font-medium">{rollbackProgress.step}</p>
+                                <div className="w-full bg-red-200 rounded-full h-1.5 overflow-hidden">
+                                  <div
+                                    className="bg-red-600 h-1.5 rounded-full transition-all duration-300"
+                                    style={{ width: `${Math.round((rollbackProgress.current / rollbackProgress.total) * 100)}%` }}
+                                  />
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-sm text-red-800">
+                                <span className="font-semibold">{wo.downloadDate}</span>
+                                {' '}작업지시서를 삭제할까요?{' '}
+                                <span
+                                  className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                                    statusColor[wo.status] || 'bg-gray-100 text-gray-700'
+                                  }`}
+                                >
+                                  현재 상태: {wo.status}
+                                </span>
+                                {' '}— 재고 역반영 후 연관 데이터가 모두 삭제됩니다.
+                              </span>
+                            )}
+                          </div>
                           <div className="ml-auto flex items-center gap-2">
                             <button
                               onClick={() => setConfirmId(null)}
@@ -539,7 +499,7 @@ export default function Dashboard() {
                               취소
                             </button>
                             <button
-                              onClick={() => handleDelete(wo.id)}
+                              onClick={() => handleDelete(wo)}
                               disabled={deleting}
                               className="px-3 py-1 text-xs text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 flex items-center gap-1"
                             >
@@ -574,6 +534,14 @@ export default function Dashboard() {
                             처리
                           </button>
                         )}
+                        <button
+                          onClick={() => setManageOrder({ id: wo.id, date: wo.downloadDate, status: wo.status as WorkOrderStatus })}
+                          className="px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 flex items-center gap-1"
+                          title="관리"
+                        >
+                          <Settings size={12} />
+                          관리
+                        </button>
                         <button
                           onClick={() => setConfirmId(wo.id)}
                           className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
@@ -697,6 +665,256 @@ export default function Dashboard() {
               >
                 <CheckCircle size={14} />
                 {approving ? '처리 중...' : '승인'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ── 롤백 관리 모달 ── */}
+      {manageOrder && !rollbackConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 space-y-5 max-h-[80vh] overflow-y-auto">
+            <div className="flex items-center gap-2">
+              <Settings size={18} className="text-gray-500" />
+              <h3 className="text-lg font-bold text-gray-900">작업지시서 관리</h3>
+              <span className="ml-auto text-sm font-medium text-gray-500">{manageOrder.date}</span>
+            </div>
+
+            {/* 스테퍼 */}
+            {(() => {
+              const steps = getSteps();
+              const states = getStepStates(manageOrder.status);
+              return (
+                <div className="flex items-center justify-between px-2">
+                  {steps.map((s, i) => {
+                    const state = states[s.step];
+                    return (
+                      <div key={s.step} className="flex items-center flex-1">
+                        <div className="flex flex-col items-center">
+                          <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
+                            state === 'done' ? 'bg-green-500 text-white' :
+                            state === 'active' ? 'bg-blue-500 text-white animate-pulse' :
+                            'bg-gray-200 text-gray-400'
+                          }`}>
+                            {state === 'done' ? <CheckCircle size={16} /> : i + 1}
+                          </div>
+                          <span className={`text-xs mt-1.5 font-medium ${
+                            state === 'done' ? 'text-green-600' :
+                            state === 'active' ? 'text-blue-600' :
+                            'text-gray-400'
+                          }`}>{s.label.replace('오프라인 ', '').replace('플레이위즈 ', '').replace('최종 ', '')}</span>
+                          <span className={`text-[10px] ${
+                            state === 'done' ? 'text-green-500' :
+                            state === 'active' ? 'text-blue-500' :
+                            'text-gray-300'
+                          }`}>{state === 'done' ? '완료' : state === 'active' ? '진행중' : '대기'}</span>
+                        </div>
+                        {i < steps.length - 1 && (
+                          <div className={`flex-1 h-0.5 mx-1 mt-[-16px] ${
+                            state === 'done' ? 'bg-green-400' : 'bg-gray-200'
+                          }`} />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })()}
+
+            {/* 롤백 가능 단계 */}
+            {(() => {
+              const step = getRollbackableStep(manageOrder.status);
+              if (!step) {
+                return (
+                  <div className="bg-gray-50 rounded-xl p-4 text-center">
+                    <p className="text-sm text-gray-500">현재 롤백 가능한 단계가 없습니다.</p>
+                    <p className="text-xs text-gray-400 mt-1">상태: {manageOrder.status}</p>
+                  </div>
+                );
+              }
+              const descriptions = getRollbackDescription(step);
+              return (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <RotateCcw size={14} className="text-orange-500" />
+                    <p className="text-sm font-semibold text-gray-700">롤백 가능: <span className="text-orange-600">{step}</span></p>
+                  </div>
+                  <div className="bg-orange-50 border border-orange-200 rounded-xl p-3 space-y-1.5">
+                    <p className="text-xs font-semibold text-orange-700">롤백 시 다음이 처리됩니다:</p>
+                    {descriptions.map((desc, i) => (
+                      <p key={i} className="text-xs text-orange-600 flex items-start gap-1.5">
+                        <span className="mt-0.5">•</span>{desc}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* 버튼 */}
+            <div className="flex gap-3 pt-1">
+              <button
+                onClick={() => { setManageOrder(null); setMarkingSessions([]); }}
+                className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm font-semibold hover:bg-gray-200"
+              >
+                닫기
+              </button>
+              {getRollbackableStep(manageOrder.status) && (
+                <button
+                  onClick={async () => {
+                    const step = getRollbackableStep(manageOrder.status);
+                    if (step === '마킹') {
+                      await loadMarkingSessions(manageOrder.id);
+                    }
+                    setRollbackConfirm(true);
+                  }}
+                  className="flex-1 py-2.5 bg-orange-500 text-white rounded-xl text-sm font-semibold hover:bg-orange-600 flex items-center justify-center gap-1.5"
+                >
+                  <RotateCcw size={14} />
+                  {getRollbackableStep(manageOrder.status)} 롤백
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── 롤백 2차 확인 모달 ── */}
+      {manageOrder && rollbackConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-md w-full overflow-hidden">
+            <div className="px-6 py-5 border-b border-gray-100">
+              <div className="flex items-center gap-2">
+                <AlertTriangle size={18} className="text-red-500" />
+                <h3 className="text-lg font-bold text-gray-900">
+                  {getRollbackableStep(manageOrder.status) === '마킹' ? '마킹 롤백 — 범위 선택' : '정말 롤백하시겠습니까?'}
+                </h3>
+              </div>
+            </div>
+            <div className="px-6 py-4 space-y-3">
+              {/* 마킹 단계: 날짜/시점 선택 UI */}
+              {getRollbackableStep(manageOrder.status) === '마킹' && markingSessions.length > 0 ? (
+                <div className="space-y-3">
+                  {/* 전체 롤백 옵션 */}
+                  <label className="flex items-center gap-3 p-3 rounded-lg border border-gray-200 cursor-pointer hover:bg-gray-50 transition-colors">
+                    <input
+                      type="radio"
+                      name="rollbackMode"
+                      checked={rollbackMode === 'all'}
+                      onChange={() => { setRollbackMode('all'); setSelectedSessions(new Set()); }}
+                      className="w-4 h-4 text-orange-600 focus:ring-orange-500"
+                    />
+                    <div className="flex-1">
+                      <p className="text-sm font-semibold text-gray-800">전체 롤백</p>
+                      <p className="text-xs text-gray-500">
+                        {markingSessions.reduce((s, m) => s + m.totalQty, 0)}개, {markingSessions.length}건 모두 삭제
+                      </p>
+                    </div>
+                  </label>
+
+                  {/* 날짜별 선택 옵션 */}
+                  <label className="flex items-center gap-3 p-3 rounded-lg border border-gray-200 cursor-pointer hover:bg-gray-50 transition-colors">
+                    <input
+                      type="radio"
+                      name="rollbackMode"
+                      checked={rollbackMode === 'select'}
+                      onChange={() => setRollbackMode('select')}
+                      className="w-4 h-4 text-orange-600 focus:ring-orange-500"
+                    />
+                    <div className="flex-1">
+                      <p className="text-sm font-semibold text-gray-800">날짜/시점별 선택</p>
+                      <p className="text-xs text-gray-500">원하는 작업만 골라서 롤백</p>
+                    </div>
+                  </label>
+
+                  {/* 세션 목록 (선택 모드일 때만) */}
+                  {rollbackMode === 'select' && (
+                    <div className="space-y-2 pl-2">
+                      {markingSessions.map((session) => {
+                        const key = session.date;
+                        const time = new Date(session.createdAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+                        const dateLabel = session.date.slice(5); // MM-DD
+                        const isSelected = selectedSessions.has(key);
+                        return (
+                          <label
+                            key={session.createdAt}
+                            className={`flex items-center gap-3 p-2.5 rounded-lg border cursor-pointer transition-colors ${
+                              isSelected ? 'border-orange-400 bg-orange-50' : 'border-gray-200 hover:bg-gray-50'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => {
+                                const next = new Set(selectedSessions);
+                                if (isSelected) next.delete(key); else next.add(key);
+                                setSelectedSessions(next);
+                              }}
+                              className="w-4 h-4 rounded text-orange-600 focus:ring-orange-500"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-gray-800">
+                                {dateLabel} <span className="text-gray-400 font-normal">{time}</span>
+                              </p>
+                            </div>
+                            <div className="text-right flex-shrink-0">
+                              <p className="text-sm font-semibold text-gray-700">{session.totalQty}개</p>
+                              <p className="text-[10px] text-gray-400">{session.itemCount}종</p>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <p className="text-sm text-gray-700">
+                    작업지시서 <span className="font-semibold">{manageOrder.date}</span>의{' '}
+                    <span className="font-semibold text-orange-600">{getRollbackableStep(manageOrder.status)}</span> 실적이
+                    모두 삭제되고 재고가 역반영됩니다.
+                  </p>
+                </>
+              )}
+
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                <p className="text-xs text-red-700 font-medium">이 작업은 되돌릴 수 없습니다.</p>
+              </div>
+
+              {/* 진행율 표시 */}
+              {rolling && rollbackProgress && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 space-y-2">
+                  <p className="text-xs text-blue-700 font-medium text-center">{rollbackProgress.step}</p>
+                  <div className="w-full bg-blue-200 rounded-full h-2 overflow-hidden">
+                    <div
+                      className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${Math.round((rollbackProgress.current / rollbackProgress.total) * 100)}%` }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-blue-500 text-center">
+                    {rollbackProgress.current} / {rollbackProgress.total}
+                    ({Math.round((rollbackProgress.current / rollbackProgress.total) * 100)}%)
+                  </p>
+                </div>
+              )}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex gap-3">
+              <button
+                onClick={() => { setRollbackConfirm(false); setMarkingSessions([]); setSelectedSessions(new Set()); }}
+                disabled={rolling}
+                className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                취소
+              </button>
+              <button
+                onClick={handleRollback}
+                disabled={rolling || (rollbackMode === 'select' && selectedSessions.size === 0)}
+                className="flex-1 py-2.5 bg-red-500 text-white rounded-lg text-sm font-semibold hover:bg-red-600 disabled:opacity-50 flex items-center justify-center gap-1.5"
+              >
+                <Trash2 size={14} />
+                {rolling ? '처리 중...' : rollbackMode === 'select' && selectedSessions.size > 0
+                  ? `선택 ${selectedSessions.size}건 롤백`
+                  : '삭제 확인'}
               </button>
             </div>
           </div>

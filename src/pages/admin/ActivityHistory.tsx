@@ -25,6 +25,14 @@ const actionLabels: Record<string, string> = {
   user_create: '계정 생성',
   user_update: '계정 수정',
   user_delete: '계정 삭제',
+  delete_shipment: '발송 삭제',
+  delete_receipt: '입고 삭제',
+  delete_marking: '마킹 삭제',
+  delete_shipment_out: '출고 삭제',
+  rollback_shipment: '발송 롤백',
+  rollback_receipt: '입고 롤백',
+  rollback_marking: '마킹 롤백',
+  rollback_shipment_out: '출고 롤백',
 };
 
 const actionColors: Record<string, string> = {
@@ -40,6 +48,14 @@ const actionColors: Record<string, string> = {
   user_create: 'bg-green-100 text-green-700',
   user_update: 'bg-yellow-100 text-yellow-700',
   user_delete: 'bg-red-100 text-red-700',
+  delete_shipment: 'bg-rose-100 text-rose-700',
+  delete_receipt: 'bg-rose-100 text-rose-700',
+  delete_marking: 'bg-rose-100 text-rose-700',
+  delete_shipment_out: 'bg-rose-100 text-rose-700',
+  rollback_shipment: 'bg-orange-100 text-orange-700',
+  rollback_receipt: 'bg-orange-100 text-orange-700',
+  rollback_marking: 'bg-orange-100 text-orange-700',
+  rollback_shipment_out: 'bg-orange-100 text-orange-700',
 };
 
 export default function ActivityHistory() {

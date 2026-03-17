@@ -1,8 +1,8 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
-import { recordTransaction } from '../../lib/inventoryTransaction';
+import { recordTransaction, deleteSystemTransactions } from '../../lib/inventoryTransaction';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
-import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, Edit3, FileUp, Truck, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, Edit3, FileUp, Trash2, Truck, XCircle } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import type { AppUser } from '../../types';
@@ -71,6 +71,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
   const [historyItems, setHistoryItems] = useState<HistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const isToday = selectedDate === today;
+
+  // 이력 삭제
+  const [historyWorkOrder, setHistoryWorkOrder] = useState<{ id: string; date: string; status: string } | null>(null);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     loadPendingOrders();
@@ -250,10 +255,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
 
   const loadHistory = async (date: string) => {
     setHistoryLoading(true);
+    setHistoryWorkOrder(null);
     try {
       const { data } = await supabase
         .from('activity_log')
-        .select('summary')
+        .select('summary, work_order_id')
         .eq('user_id', currentUser.id)
         .eq('action_type', 'shipment_confirm')
         .eq('action_date', date);
@@ -265,8 +271,82 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         }))
       );
       setHistoryItems(entries);
+
+      // 해당 날짜 발송의 work_order 상태 조회 (삭제 가능 여부 판단용)
+      const woId = (data || [])[0]?.work_order_id;
+      if (woId) {
+        const { data: wo } = await supabase
+          .from('work_order')
+          .select('id, download_date, status')
+          .eq('id', woId)
+          .maybeSingle();
+        if (wo) setHistoryWorkOrder({ id: (wo as any).id, date: (wo as any).download_date, status: (wo as any).status });
+      }
     } catch { /* silent */ }
     finally { setHistoryLoading(false); }
+  };
+
+  // ── 발송 실적 삭제 ──
+  const handleDeleteShipment = async () => {
+    if (!historyWorkOrder) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      // 1) work_order_line.sent_qty → 0 초기화
+      const { data: lines } = await supabase
+        .from('work_order_line')
+        .select('id')
+        .eq('work_order_id', historyWorkOrder.id);
+      for (const line of (lines || []) as any[]) {
+        await supabase
+          .from('work_order_line')
+          .update({ sent_qty: 0 })
+          .eq('id', line.id);
+      }
+
+      // 2) work_order.status → '이관준비' 복원
+      await supabase
+        .from('work_order')
+        .update({ status: '이관준비' })
+        .eq('id', historyWorkOrder.id);
+
+      // 3) inventory_transaction 삭제 + inventory 역반영
+      const { data: warehouse } = await supabase
+        .from('warehouse')
+        .select('id')
+        .eq('name', '오프라인샵')
+        .maybeSingle();
+      if (warehouse) {
+        await deleteSystemTransactions({
+          warehouseId: (warehouse as any).id,
+          memo: `발송확인 (작업지시서 ${historyWorkOrder.date})`,
+        });
+      }
+
+      // 4) activity_log에 삭제 이력 기록
+      await supabase.from('activity_log').insert({
+        user_id: currentUser.id,
+        action_type: 'delete_shipment',
+        work_order_id: historyWorkOrder.id,
+        action_date: today,
+        summary: {
+          items: historyItems.map((h) => ({ skuName: h.skuName, sentQty: h.qty })),
+          totalQty: historyItems.reduce((s, h) => s + h.qty, 0),
+          workOrderDate: historyWorkOrder.date,
+          deletedDate: selectedDate,
+        },
+      });
+
+      // 5) UI 초기화
+      setHistoryItems([]);
+      setHistoryWorkOrder(null);
+      setShowDeleteModal(false);
+      loadPendingOrders();
+    } catch (e: any) {
+      setError(`삭제 실패: ${e.message || '알 수 없는 오류'}`);
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const formatDate = (d: string) => {
@@ -384,12 +464,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       for (let i = 0; i < lineList.length; i++) {
         const line = lineList[i];
         setConfirmProgress({ current: step, total: totalSteps, step: `라인 처리 중... (${i + 1} / ${lineList.length})` });
-        const lineSentQty = line.needs_marking
-          ? line.ordered_qty
-          : (sentMap[line.finished_sku_id] ?? line.ordered_qty);
+        // 모든 라인은 원래 주문 수량(ordered_qty)을 sent_qty로 기록
+        // (sentMap은 BOM 합산값이라 단품 라인에 적용하면 과다 기록됨)
         await supabase
           .from('work_order_line')
-          .update({ sent_qty: lineSentQty })
+          .update({ sent_qty: line.ordered_qty })
           .eq('id', line.id);
         step++;
       }
@@ -630,13 +709,78 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           </div>
         </>
       )}
+      {/* 삭제 버튼 영역 */}
+      {historyItems.length > 0 && historyWorkOrder && (
+        <div className="px-5 py-3 bg-red-50 border-t border-red-100">
+          {historyWorkOrder.status === '이관중' ? (
+            <button
+              onClick={() => setShowDeleteModal(true)}
+              className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-red-500 text-white rounded-lg text-sm font-medium hover:bg-red-600 transition-colors"
+            >
+              <Trash2 size={16} />
+              발송 실적 삭제
+            </button>
+          ) : (
+            <p className="text-xs text-red-400 text-center">
+              {historyWorkOrder.status === '입고확인완료' || historyWorkOrder.status === '마킹중' || historyWorkOrder.status === '마킹완료' || historyWorkOrder.status === '출고완료'
+                ? '입고확인 완료 — 삭제 불가'
+                : `현재 상태: ${historyWorkOrder.status} — 삭제 불가`}
+            </p>
+          )}
+        </div>
+      )}
       <div className="px-5 py-3 bg-blue-50 border-t border-blue-100 text-center">
-        <button onClick={() => { setSelectedDate(today); setHistoryItems([]); }} className="text-sm text-blue-600 font-medium hover:underline">
+        <button onClick={() => { setSelectedDate(today); setHistoryItems([]); setHistoryWorkOrder(null); }} className="text-sm text-blue-600 font-medium hover:underline">
           오늘 작업으로 돌아가기
         </button>
       </div>
     </div>
   );
+
+  // ── 삭제 확인 모달 ──
+  const DeleteConfirmModal = () => {
+    if (!showDeleteModal) return null;
+    return (
+      <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full overflow-hidden">
+          <div className="px-6 py-5 border-b border-gray-100">
+            <h3 className="text-lg font-bold text-gray-900">발송 실적 삭제</h3>
+            <p className="text-sm text-gray-500 mt-1">이 작업은 되돌릴 수 없습니다</p>
+          </div>
+          <div className="px-6 py-4 space-y-3">
+            <div className="bg-red-50 rounded-lg p-3">
+              <p className="text-sm text-red-700 font-medium">삭제 시 다음이 함께 처리됩니다:</p>
+              <ul className="text-xs text-red-600 mt-2 space-y-1">
+                <li>• 발송 수량 초기화 (sent_qty → 0)</li>
+                <li>• 작업지시서 상태 복원 (이관준비)</li>
+                <li>• 재고 수불부 트랜잭션 삭제 + 재고 복원</li>
+              </ul>
+            </div>
+            <div className="text-sm text-gray-600">
+              <p>작업지시서: <span className="font-medium">{historyWorkOrder?.date}</span></p>
+              <p>삭제 대상: <span className="font-medium">{historyItems.length}종 / {historyItems.reduce((s, h) => s + h.qty, 0)}개</span></p>
+            </div>
+          </div>
+          <div className="px-6 py-4 border-t border-gray-100 flex gap-3">
+            <button
+              onClick={() => setShowDeleteModal(false)}
+              disabled={deleting}
+              className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50"
+            >
+              취소
+            </button>
+            <button
+              onClick={handleDeleteShipment}
+              disabled={deleting}
+              className="flex-1 py-2.5 bg-red-500 text-white rounded-lg text-sm font-medium hover:bg-red-600 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {deleting ? '삭제 중...' : '삭제 확인'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   // ── 최근 발송 건 (취소/수정 가능) 패널 ──
   const RecentShippedPanel = () => {
@@ -1254,6 +1398,9 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           </div>
         </div>
       )}
+
+      {/* ── 삭제 확인 모달 ── */}
+      <DeleteConfirmModal />
     </div>
   );
 }

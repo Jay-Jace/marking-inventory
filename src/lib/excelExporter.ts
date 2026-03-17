@@ -7,12 +7,14 @@ interface TransferLine {
 }
 
 interface InventoryAdjLine {
+  skuId: string;       // BERRIZ 숫자형 SKU ID
   warehouseId: string;
-  skuId: string;
-  skuName: string;
   quantity: number;
-  code: 'M' | 'P'; // M=차감, P=증가
-  reason: string;
+  code: 'M' | 'P';    // M=차감, P=증가
+  reason: string;      // 조정사유코드 (ETC)
+  memo: string;        // 비고
+  skuCode: string;     // SKU코드 (26UN-...)
+  skuName: string;     // 상품명
 }
 
 interface CjReceiptLine {
@@ -53,8 +55,8 @@ export function exportInventoryAdjustment(
   suffix: string
 ) {
   const ws = XLSX.utils.aoa_to_sheet([
-    ['창고 ID', 'SKU ID', 'SKU명', '수량', '코드', '사유코드'],
-    ...lines.map((l) => [l.warehouseId, l.skuId, l.skuName, l.quantity, l.code, l.reason]),
+    ['SKU ID', '창고 ID', '조정수량', '증가(P)/차감(M)', '조정사유코드(AdjustmentReason)', '비고', 'SKU코드', '상품명'],
+    ...lines.map((l) => [l.skuId, l.warehouseId, l.quantity, l.code, l.reason, l.memo, l.skuCode, l.skuName]),
   ]);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '재고조정양식');
@@ -123,8 +125,8 @@ export function exportAllForms(params: {
 
   // 재고조정 시트 (오프라인 M차감)
   const wsAdj = XLSX.utils.aoa_to_sheet([
-    ['창고 ID', 'SKU ID', 'SKU명', '수량', '코드', '사유코드'],
-    ...offlineAdjLines.map((l) => [l.warehouseId, l.skuId, l.skuName, l.quantity, l.code, l.reason]),
+    ['SKU ID', '창고 ID', '조정수량', '증가(P)/차감(M)', '조정사유코드(AdjustmentReason)', '비고', 'SKU코드', '상품명'],
+    ...offlineAdjLines.map((l) => [l.skuId, l.warehouseId, l.quantity, l.code, l.reason, l.memo, l.skuCode, l.skuName]),
   ]);
   XLSX.utils.book_append_sheet(wb, wsAdj, '재고조정양식');
 
