@@ -827,7 +827,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   // ── 렌더링 ──
 
   return (
-    <div className="space-y-5 max-w-3xl">
+    <div className="space-y-5 max-w-5xl">
       {/* 에러 */}
       {error && (
         <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
@@ -1153,6 +1153,9 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             </div>
           </div>
 
+          {/* 2컬럼 레이아웃: 작업 목록(왼쪽) + 작업 불가(오른쪽) */}
+          <div className={`grid gap-4 ${unavailableItems.length > 0 ? 'grid-cols-1 lg:grid-cols-[1fr_320px]' : 'grid-cols-1'}`}>
+
           {/* 작업 목록 카드 */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
             {items.length === 0 ? (
@@ -1200,12 +1203,12 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             )}
           </div>
 
-          {/* 작업 불가 리스트 (접이식 아코디언) */}
+          {/* 작업 불가 리스트 (오른쪽 사이드 패널) */}
           {unavailableItems.length > 0 && (
-            <div className="mt-4">
+            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden self-start lg:sticky lg:top-4">
               <button
                 onClick={() => setShowUnavailable(!showUnavailable)}
-                className="w-full flex items-center justify-between px-4 py-3 bg-gray-100 border border-gray-200 rounded-xl text-sm font-medium text-gray-600 hover:bg-gray-150 transition-colors"
+                className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-100 text-sm font-medium text-gray-600 hover:bg-gray-100 transition-colors"
               >
                 <div className="flex items-center gap-2">
                   <AlertTriangle size={14} className="text-yellow-600" />
@@ -1217,15 +1220,15 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
                 </div>
               </button>
               {showUnavailable && (
-                <div className="space-y-2 mt-2">
+                <div className="p-3 space-y-2 max-h-[60vh] overflow-y-auto">
                   {unavailableItems.map((item) => (
-                    <div key={item.lineId} className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 opacity-60">
-                      <div className="flex items-center justify-between">
-                        <p className="text-sm font-medium text-gray-600">{item.skuName}</p>
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700">{item.reason}</span>
+                    <div key={item.lineId} className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <p className="text-xs font-medium text-gray-600 leading-snug">{item.skuName}</p>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 whitespace-nowrap flex-shrink-0">{item.reason}</span>
                       </div>
-                      <p className="text-xs text-gray-400 mt-1">
-                        주문 {item.orderedQty} / 입고 {item.receivedQty} / 마킹완료 {item.markedQty}
+                      <p className="text-[10px] text-gray-400 mt-1">
+                        주문 {item.orderedQty} / 입고 {item.receivedQty} / 마킹 {item.markedQty}
                       </p>
                     </div>
                   ))}
@@ -1233,6 +1236,8 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
               )}
             </div>
           )}
+
+          </div> {/* grid 닫기 */}
 
           {items.length > 0 && (
             <>
