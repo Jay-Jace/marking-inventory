@@ -7,6 +7,7 @@ import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import { TableSkeleton } from '../../components/LoadingSkeleton';
+import { notifySlack } from '../../lib/slackNotify';
 import type { AppUser } from '../../types';
 import {
   AlertTriangle,
@@ -487,6 +488,15 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
       await selectOrder(selectedOrder);
       setSaved(true);
+
+      // 슬랙 알림
+      const savedItems = items.filter((i) => (i.todayQty || 0) > 0);
+      notifySlack({
+        action: '마킹작업',
+        user: currentUser.name || currentUser.email,
+        date: selectedOrder.download_date,
+        items: savedItems.map((i) => ({ name: i.skuName, qty: i.todayQty || 0 })),
+      }).catch(() => {});
     } catch (e: any) {
       setError(`마킹 저장 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {

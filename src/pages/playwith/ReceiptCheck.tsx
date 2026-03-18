@@ -2,6 +2,7 @@ import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { recordTransaction, deleteSystemTransactions } from '../../lib/inventoryTransaction';
 import { type ProgressCallback } from '../../lib/workOrderRollback';
+import { notifySlack } from '../../lib/slackNotify';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, FileUp, Trash2 } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
@@ -453,6 +454,14 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
 
       setDone(true);
       loadOrders();
+
+      // 슬랙 알림
+      notifySlack({
+        action: '입고확인',
+        user: currentUser.name || currentUser.email,
+        date: selectedOrder.download_date,
+        items: items.filter((i) => i.actualQty > 0).map((i) => ({ name: i.skuName, qty: i.actualQty })),
+      }).catch(() => {});
     } catch (e: any) {
       setError(`입고 확인 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {

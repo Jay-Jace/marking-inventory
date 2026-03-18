@@ -6,6 +6,7 @@ import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, Edit3,
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import { TwoColumnSkeleton } from '../../components/LoadingSkeleton';
+import { notifySlack } from '../../lib/slackNotify';
 import type { AppUser } from '../../types';
 
 interface ShipmentItem {
@@ -528,6 +529,14 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       setConfirmedWoDate(selectedWo.download_date);
       setConfirmed(true);
       loadPendingOrders();
+
+      // 슬랙 알림 (실패해도 무시)
+      notifySlack({
+        action: '발송확인',
+        user: currentUser.name || currentUser.email,
+        date: selectedWo.download_date,
+        items: finalItems.filter((i) => i.sentQty > 0).map((i) => ({ name: i.skuName, qty: i.sentQty })),
+      }).catch(() => {});
     } catch (e: any) {
       setError(`발송 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {

@@ -7,6 +7,7 @@ import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, FileUp
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import { TableSkeleton } from '../../components/LoadingSkeleton';
+import { notifySlack } from '../../lib/slackNotify';
 import type { AppUser } from '../../types';
 
 interface ShipmentOutItem {
@@ -404,6 +405,16 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
 
       setConfirmed(true);
       loadPendingOrders();
+
+      // 슬랙 알림
+      const shippedItems = items.filter((i) => i.shipQty > 0);
+      notifySlack({
+        action: '출고확인',
+        user: currentUser.name || currentUser.email,
+        date: selectedWo.download_date,
+        items: shippedItems.map((i) => ({ name: i.skuName, qty: i.shipQty })),
+        extra: selectedWo.status === '마킹중' ? '_부분 출고 (마킹 진행 중)_' : undefined,
+      }).catch(() => {});
     } catch (e: any) {
       setError(`출고 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {
