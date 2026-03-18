@@ -91,7 +91,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
   // 작업 불가 리스트
   const [unavailableItems, setUnavailableItems] = useState<UnavailableItem[]>([]);
-  const [showUnavailable, setShowUnavailable] = useState(true);
+  const [showUnavailable, setShowUnavailable] = useState(false);
 
   // 내일 날짜 계산
   const tomorrowDate = (() => {
@@ -1154,54 +1154,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             </div>
           </div>
 
-          {/* 작업 목록 카드 */}
-          <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-            {items.length === 0 ? (
-              <div className="px-5 py-8 text-center text-gray-400 text-sm">
-                모든 마킹 작업이 완료되었습니다
-              </div>
-            ) : (
-              <>
-                {/* 이월 작업건 (상단, 주황 배경) */}
-                {carryOverItems.length > 0 && (
-                  <div>
-                    <div className="px-4 py-2.5 bg-orange-50 border-b border-orange-200 flex items-center gap-2">
-                      <AlertTriangle size={14} className="text-orange-600" />
-                      <span className="text-sm font-medium text-orange-800">
-                        이월 작업 ({carryOverItems.length}건) — 우선 처리
-                      </span>
-                    </div>
-                    <div className="divide-y divide-gray-50">
-                      {carryOverItems.map(renderItemRow)}
-                    </div>
-                  </div>
-                )}
-
-                {/* 오늘 신규 작업건 */}
-                {todayNewItems.length > 0 && (
-                  <div>
-                    <div className="px-4 py-2.5 bg-blue-50 border-b border-blue-200 flex items-center gap-2">
-                      <span className="text-sm font-medium text-blue-800">
-                        {carryOverItems.length > 0 ? '오늘 작업' : '작업 목록'} ({todayNewItems.length}건)
-                      </span>
-                    </div>
-                    <div className="divide-y divide-gray-50">
-                      {todayNewItems.map(renderItemRow)}
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-
-            {items.length > 0 && (
-              <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
-                <p className="text-sm text-gray-600">물류센터 발송 합계:</p>
-                <p className="text-sm font-bold text-gray-900">{totalToday}개</p>
-              </div>
-            )}
-          </div>
-
-          {/* 작업 불가 리스트 — 작업 목록과 동일 크기 */}
+          {/* 작업 불가 리스트 — 작업 목록 위에 배치 (기본 접힘) */}
           {unavailableItems.length > 0 && (
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
               <div className="px-4 py-3 bg-yellow-50 border-b border-yellow-200 flex items-center justify-between">
@@ -1252,6 +1205,53 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
               )}
             </div>
           )}
+
+          {/* 작업 목록 카드 */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+            {items.length === 0 ? (
+              <div className="px-5 py-8 text-center text-gray-400 text-sm">
+                모든 마킹 작업이 완료되었습니다
+              </div>
+            ) : (
+              <>
+                {/* 이월 작업건 (상단, 주황 배경) */}
+                {carryOverItems.length > 0 && (
+                  <div>
+                    <div className="px-4 py-2.5 bg-orange-50 border-b border-orange-200 flex items-center gap-2">
+                      <AlertTriangle size={14} className="text-orange-600" />
+                      <span className="text-sm font-medium text-orange-800">
+                        이월 작업 ({carryOverItems.length}건) — 우선 처리
+                      </span>
+                    </div>
+                    <div className="divide-y divide-gray-50">
+                      {carryOverItems.map(renderItemRow)}
+                    </div>
+                  </div>
+                )}
+
+                {/* 오늘 신규 작업건 */}
+                {todayNewItems.length > 0 && (
+                  <div>
+                    <div className="px-4 py-2.5 bg-blue-50 border-b border-blue-200 flex items-center gap-2">
+                      <span className="text-sm font-medium text-blue-800">
+                        {carryOverItems.length > 0 ? '오늘 작업' : '작업 목록'} ({todayNewItems.length}건)
+                      </span>
+                    </div>
+                    <div className="divide-y divide-gray-50">
+                      {todayNewItems.map(renderItemRow)}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+
+            {items.length > 0 && (
+              <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
+                <p className="text-sm text-gray-600">물류센터 발송 합계:</p>
+                <p className="text-sm font-bold text-gray-900">{totalToday}개</p>
+              </div>
+            )}
+          </div>
 
           {items.length > 0 && (
             <>
