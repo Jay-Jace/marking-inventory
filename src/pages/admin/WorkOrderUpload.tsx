@@ -100,14 +100,22 @@ export default function WorkOrderUpload() {
       await supabase.from('sku').upsert(skuUpserts, { onConflict: 'sku_id' });
 
       // 단품(유니폼+마킹) berriz_id 업데이트 (이관지시서 시트에서 추출)
+      // 20건씩 배치 병렬 처리로 속도 개선
       if (result.berrizIdMap) {
         const entries = Object.entries(result.berrizIdMap);
-        for (const [code, berrizId] of entries) {
-          await supabase
-            .from('sku')
-            .update({ berriz_id: berrizId })
-            .eq('sku_id', code)
-            .is('berriz_id', null); // berriz_id가 없는 경우에만 업데이트
+        const BATCH = 20;
+        for (let i = 0; i < entries.length; i += BATCH) {
+          const batch = entries.slice(i, i + BATCH);
+          await Promise.all(
+            batch.map(([code, berrizId]) =>
+              supabase.from('sku').update({ berriz_id: berrizId })
+                .eq('sku_id', code).is('berriz_id', null)
+            )
+          );
+          setSaveProgress({
+            current: 2, total: 4,
+            step: `SKU 등록 중... (${Math.min(i + BATCH, entries.length)}/${entries.length})`,
+          });
         }
       }
 

@@ -340,7 +340,9 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
     setConfirmProgress(null);
     setError(null);
     try {
-      const totalSteps = items.length + 2;
+      const BATCH = 10;
+      const activeItems = items.filter((i) => i.shipQty > 0);
+      const totalSteps = Math.ceil(activeItems.length / BATCH) + 3;
       let step = 1;
 
       // 1. 상태 '출고완료'로 업데이트
@@ -361,40 +363,33 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         .maybeSingle();
       step++;
 
-      // 3. 플레이위즈 재고 차감 (finished_sku_id 수준)
+      // 3. 플레이위즈 재고 차감 (배치 병렬)
       if (warehouse) {
-        for (let i = 0; i < items.length; i++) {
-          const item = items[i];
-          setConfirmProgress({
-            current: step,
-            total: totalSteps,
-            step: `재고 차감 중... (${i + 1} / ${items.length})`,
-          });
-
-          const { data: inv } = await supabase
-            .from('inventory')
-            .select('id, quantity')
-            .eq('warehouse_id', (warehouse as any).id)
-            .eq('sku_id', item.finishedSkuId)
-            .maybeSingle();
-
-          if (inv) {
-            await supabase
+        const whId = (warehouse as any).id;
+        for (let i = 0; i < activeItems.length; i += BATCH) {
+          const batch = activeItems.slice(i, i + BATCH);
+          setConfirmProgress({ current: step, total: totalSteps, step: `재고 차감 중... (${Math.min(i + BATCH, activeItems.length)} / ${activeItems.length})` });
+          await Promise.all(batch.map(async (item) => {
+            const { data: inv } = await supabase
               .from('inventory')
-              .update({ quantity: Math.max(0, (inv as any).quantity - item.shipQty) })
-              .eq('id', (inv as any).id);
-          }
-          // 수불부 트랜잭션 기록
-          if (item.shipQty > 0) {
+              .select('id, quantity')
+              .eq('warehouse_id', whId)
+              .eq('sku_id', item.finishedSkuId)
+              .maybeSingle();
+            if (inv) {
+              await supabase.from('inventory')
+                .update({ quantity: Math.max(0, (inv as any).quantity - item.shipQty) })
+                .eq('id', (inv as any).id);
+            }
             await recordTransaction({
-              warehouseId: (warehouse as any).id,
+              warehouseId: whId,
               skuId: item.finishedSkuId,
               txType: '출고',
               quantity: item.shipQty,
               source: 'system',
               memo: `출고확인 (작업지시서 ${selectedWo.download_date})`,
             });
-          }
+          }));
           step++;
         }
       }

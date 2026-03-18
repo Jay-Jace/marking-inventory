@@ -458,19 +458,18 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         .select('finished_sku_id, component_sku_id, quantity')
         .in('finished_sku_id', confirmMarkingSkuIds.length > 0 ? confirmMarkingSkuIds : ['__none__']);
       if (bomErr) throw bomErr;
-      const totalSteps = lineList.length + finalItems.length + 2;
-      let step = 3;
+      // 라인 sent_qty 업데이트 (10건씩 배치 병렬)
+      const BATCH = 10;
+      const totalBatches = Math.ceil(lineList.length / BATCH) + Math.ceil(finalItems.length / BATCH) + 2;
+      let batchStep = 3;
 
-      for (let i = 0; i < lineList.length; i++) {
-        const line = lineList[i];
-        setConfirmProgress({ current: step, total: totalSteps, step: `라인 처리 중... (${i + 1} / ${lineList.length})` });
-        // 모든 라인은 원래 주문 수량(ordered_qty)을 sent_qty로 기록
-        // (sentMap은 BOM 합산값이라 단품 라인에 적용하면 과다 기록됨)
-        await supabase
-          .from('work_order_line')
-          .update({ sent_qty: line.ordered_qty })
-          .eq('id', line.id);
-        step++;
+      for (let i = 0; i < lineList.length; i += BATCH) {
+        const batch = lineList.slice(i, i + BATCH);
+        setConfirmProgress({ current: batchStep, total: totalBatches, step: `라인 처리 중... (${Math.min(i + BATCH, lineList.length)} / ${lineList.length})` });
+        await Promise.all(batch.map((line: any) =>
+          supabase.from('work_order_line').update({ sent_qty: line.ordered_qty }).eq('id', line.id)
+        ));
+        batchStep++;
       }
 
       const { data: warehouse } = await supabase
@@ -480,14 +479,16 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         .maybeSingle();
 
       if (warehouse) {
-        for (let i = 0; i < finalItems.length; i++) {
-          const item = finalItems[i];
-          setConfirmProgress({ current: step, total: totalSteps, step: `재고 차감 중... (${i + 1} / ${finalItems.length})` });
-          if (item.sentQty > 0) {
+        const whId = (warehouse as any).id;
+        const activeItems = finalItems.filter((item) => item.sentQty > 0);
+        for (let i = 0; i < activeItems.length; i += BATCH) {
+          const batch = activeItems.slice(i, i + BATCH);
+          setConfirmProgress({ current: batchStep, total: totalBatches, step: `재고 차감 중... (${Math.min(i + BATCH, activeItems.length)} / ${activeItems.length})` });
+          await Promise.all(batch.map(async (item) => {
             const { data: inv } = await supabase
               .from('inventory')
               .select('id, quantity')
-              .eq('warehouse_id', (warehouse as any).id)
+              .eq('warehouse_id', whId)
               .eq('sku_id', item.skuId)
               .maybeSingle();
             if (inv) {
@@ -496,17 +497,16 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                 .update({ quantity: Math.max(0, (inv as any).quantity - item.sentQty) })
                 .eq('id', (inv as any).id);
             }
-            // 수불부 트랜잭션 기록
             await recordTransaction({
-              warehouseId: (warehouse as any).id,
+              warehouseId: whId,
               skuId: item.skuId,
               txType: '출고',
               quantity: item.sentQty,
               source: 'system',
               memo: `발송확인 (작업지시서 ${selectedWo.download_date})`,
             });
-          }
-          step++;
+          }));
+          batchStep++;
         }
       }
 

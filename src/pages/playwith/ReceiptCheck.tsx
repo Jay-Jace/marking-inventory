@@ -355,24 +355,29 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       const actualMap: Record<string, number> = {};
       for (const item of items) actualMap[item.skuId] = item.actualQty;
 
-      const stepsTotal = lineList.length + items.length + 3;
+      const BATCH = 10;
+      const lineBatches = Math.ceil(lineList.length / BATCH);
+      const activeItems = items.filter((i) => i.actualQty > 0);
+      const itemBatches = Math.ceil(activeItems.length / BATCH);
+      const stepsTotal = lineBatches + itemBatches + 3;
+      let progressStep = 1;
 
-      // ── received_qty 업데이트 ──
-      for (let i = 0; i < lineList.length; i++) {
-        const line = lineList[i];
-        setSaveProgress({ current: i + 1, total: stepsTotal, step: `입고 수량 처리 중... (${i + 1} / ${lineList.length})` });
-        const receivedQty = line.needs_marking
-          ? line.ordered_qty
-          : (actualMap[line.finished_sku_id] ?? line.ordered_qty);
-        const { error: updateErr } = await supabase
-          .from('work_order_line')
-          .update({ received_qty: receivedQty })
-          .eq('id', line.id);
-        if (updateErr) throw updateErr;
+      // ── received_qty 업데이트 (배치 병렬) ──
+      for (let i = 0; i < lineList.length; i += BATCH) {
+        const batch = lineList.slice(i, i + BATCH);
+        progressStep++;
+        setSaveProgress({ current: progressStep, total: stepsTotal, step: `입고 수량 처리 중... (${Math.min(i + BATCH, lineList.length)} / ${lineList.length})` });
+        await Promise.all(batch.map((line: any) => {
+          const receivedQty = line.needs_marking
+            ? line.ordered_qty
+            : (actualMap[line.finished_sku_id] ?? line.ordered_qty);
+          return supabase.from('work_order_line').update({ received_qty: receivedQty }).eq('id', line.id);
+        }));
       }
 
-      // ── 플레이위즈 재고 증가 ──
-      setSaveProgress({ current: lineList.length + 1, total: stepsTotal, step: '플레이위즈 창고 조회 중...' });
+      // ── 플레이위즈 재고 증가 (배치 병렬) ──
+      progressStep++;
+      setSaveProgress({ current: progressStep, total: stepsTotal, step: '플레이위즈 창고 조회 중...' });
       const { data: pwWarehouse, error: pwWhErr } = await supabase
         .from('warehouse')
         .select('id')
@@ -382,39 +387,31 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
 
       if (pwWarehouse) {
         const pwWhId = (pwWarehouse as any).id;
-        for (let i = 0; i < items.length; i++) {
-          const item = items[i];
-          if (item.actualQty <= 0) continue;
-          setSaveProgress({
-            current: lineList.length + 2 + i,
-            total: stepsTotal,
-            step: `재고 반영 중... (${i + 1} / ${items.length})`,
-          });
-
-          const { data: existing } = await supabase
-            .from('inventory')
-            .select('quantity')
-            .eq('warehouse_id', pwWhId)
-            .eq('sku_id', item.skuId)
-            .maybeSingle();
-
-          const newQty = ((existing as any)?.quantity || 0) + item.actualQty;
-          const { error: upsertErr } = await supabase
-            .from('inventory')
-            .upsert(
+        for (let i = 0; i < activeItems.length; i += BATCH) {
+          const batch = activeItems.slice(i, i + BATCH);
+          progressStep++;
+          setSaveProgress({ current: progressStep, total: stepsTotal, step: `재고 반영 중... (${Math.min(i + BATCH, activeItems.length)} / ${activeItems.length})` });
+          await Promise.all(batch.map(async (item) => {
+            const { data: existing } = await supabase
+              .from('inventory')
+              .select('quantity')
+              .eq('warehouse_id', pwWhId)
+              .eq('sku_id', item.skuId)
+              .maybeSingle();
+            const newQty = ((existing as any)?.quantity || 0) + item.actualQty;
+            await supabase.from('inventory').upsert(
               { warehouse_id: pwWhId, sku_id: item.skuId, quantity: newQty },
               { onConflict: 'warehouse_id,sku_id' }
             );
-          if (upsertErr) throw upsertErr;
-          // 수불부 트랜잭션 기록
-          await recordTransaction({
-            warehouseId: pwWhId,
-            skuId: item.skuId,
-            txType: '입고',
-            quantity: item.actualQty,
-            source: 'system',
-            memo: `입고확인 (작업지시서 ${selectedOrder.download_date})`,
-          });
+            await recordTransaction({
+              warehouseId: pwWhId,
+              skuId: item.skuId,
+              txType: '입고',
+              quantity: item.actualQty,
+              source: 'system',
+              memo: `입고확인 (작업지시서 ${selectedOrder.download_date})`,
+            });
+          }));
         }
       }
 

@@ -341,7 +341,8 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     setError(null);
     try {
       const activeItems = items.filter((item) => item.todayQty > 0);
-      const total = activeItems.length + 2;
+      // 총 단계: 창고조회(1) + 아이템당(daily_marking+marked_qty+BOM구성품+완성품 = 각각 1) + 상태확인(1) + 상태업데이트(1)
+      const total = activeItems.length + 3;
       let processed = 0;
 
       // 플레이위즈 warehouse ID 조회 (1회)
