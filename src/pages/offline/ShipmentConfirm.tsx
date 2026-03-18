@@ -583,14 +583,22 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         }
       }
 
-      // Activity log
+      // Activity log — 차수(wave) 번호 계산 후 저장
       try {
+        const { data: existingWaves } = await supabase
+          .from('activity_log')
+          .select('id')
+          .eq('work_order_id', selectedWo.id)
+          .eq('action_type', 'shipment_confirm');
+        const waveNum = (existingWaves || []).length + 1;
+
         await supabase.from('activity_log').insert({
           user_id: currentUser.id,
           action_type: 'shipment_confirm',
           work_order_id: selectedWo.id,
           action_date: new Date().toISOString().split('T')[0],
           summary: {
+            wave: waveNum,
             items: finalItems.filter((i) => i.sentQty > 0).map((i) => ({ skuId: i.skuId, skuName: i.skuName, sentQty: i.sentQty })),
             totalQty: finalItems.reduce((s, i) => s + i.sentQty, 0),
             workOrderDate: selectedWo.download_date,

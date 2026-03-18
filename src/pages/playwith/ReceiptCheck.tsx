@@ -22,6 +22,8 @@ interface ReceiptItem {
 interface PendingOrder {
   id: string;
   download_date: string;
+  status: string;
+  pendingWaveCount: number;
 }
 
 export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) {
@@ -37,6 +39,10 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
   const [uploadComparison, setUploadComparison] = useState<{ rows: ComparisonRow[]; unmatched: string[] } | null>(null);
   const [xlsxError, setXlsxError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 차수 관련 상태
+  const [currentWaveNum, setCurrentWaveNum] = useState<number>(1);
+  const [pendingWaveCount, setPendingWaveCount] = useState<number>(0);
 
   // 이력 조회
   const today = new Date().toISOString().split('T')[0];
@@ -59,16 +65,51 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
     setLoading(true);
     setError(null);
     try {
+      // 미입고 차수가 있을 수 있는 모든 상태의 WO 조회
       const { data, error: err } = await supabase
         .from('work_order')
-        .select('id, download_date')
-        .eq('status', '이관중')
+        .select('id, download_date, status')
+        .in('status', ['이관중', '입고확인완료', '마킹중', '마킹완료'])
         .order('uploaded_at', { ascending: false });
       if (err) throw err;
       if (isStale()) return;
-      const list = (data || []) as PendingOrder[];
-      setOrders(list);
-      if (list.length > 0) selectOrder(list[0]);
+
+      const woIds = (data || []).map((w: any) => w.id);
+      if (woIds.length === 0) {
+        setOrders([]);
+        setLoading(false);
+        return;
+      }
+
+      // 모든 발송/입고 activity_log 한번에 조회
+      const [allShipRes, allRecRes] = await Promise.all([
+        supabase.from('activity_log').select('work_order_id, summary').in('work_order_id', woIds).eq('action_type', 'shipment_confirm'),
+        supabase.from('activity_log').select('work_order_id, summary').in('work_order_id', woIds).eq('action_type', 'receipt_check'),
+      ]);
+      if (isStale()) return;
+
+      // WO별 미입고 차수 계산
+      const pendingList: PendingOrder[] = (data || []).filter((wo: any) => {
+        const ships = (allShipRes.data || []).filter((s: any) => s.work_order_id === wo.id);
+        const recs = (allRecRes.data || []).filter((r: any) => r.work_order_id === wo.id);
+        if (ships.length === 0) return false; // 발송 없음 -> 표시 안함
+        const recWaves = new Set(recs.map((r: any) => r.summary?.wave ?? 1));
+        return ships.some((s: any) => !recWaves.has(s.summary?.wave ?? 1));
+      }).map((wo: any) => {
+        const ships = (allShipRes.data || []).filter((s: any) => s.work_order_id === wo.id);
+        const recs = (allRecRes.data || []).filter((r: any) => r.work_order_id === wo.id);
+        const recWaves = new Set(recs.map((r: any) => r.summary?.wave ?? 1));
+        const pendingCount = ships.filter((s: any) => !recWaves.has(s.summary?.wave ?? 1)).length;
+        return {
+          id: wo.id,
+          download_date: wo.download_date,
+          status: wo.status,
+          pendingWaveCount: pendingCount,
+        };
+      });
+
+      setOrders(pendingList);
+      if (pendingList.length > 0) selectOrder(pendingList[0]);
       else setLoading(false);
     } catch (e: any) {
       if (!isStale()) setError(`데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
@@ -84,75 +125,72 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
     setUploadComparison(null);
     setXlsxError(null);
     try {
-      // 바코드 포함 조회
-      const { data: lines, error: linesErr } = await supabase
-        .from('work_order_line')
-        .select('finished_sku_id, sent_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
-        .eq('work_order_id', wo.id);
-      if (linesErr) throw linesErr;
+      // 1. 발송 차수 조회 (shipment_confirm)
+      const { data: shipmentLogs } = await supabase
+        .from('activity_log')
+        .select('id, summary, created_at')
+        .eq('work_order_id', wo.id)
+        .eq('action_type', 'shipment_confirm')
+        .order('created_at', { ascending: true });
+
+      // 2. 입고 차수 조회 (receipt_check)
+      const { data: receiptLogs } = await supabase
+        .from('activity_log')
+        .select('id, summary')
+        .eq('work_order_id', wo.id)
+        .eq('action_type', 'receipt_check');
+
       if (isStale()) return;
 
-      // BOM — 마킹 대상 finished_sku_id로 필터링 (필터 없으면 1,000행 제한에 걸려 누락 발생)
-      const markingSkuIds = ((lines || []) as any[])
-        .filter((l) => l.needs_marking)
-        .map((l) => l.finished_sku_id as string);
-      const { data: bomData, error: bomErr } = await supabase
-        .from('bom')
-        .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, barcode)')
-        .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']);
-      if (bomErr) throw bomErr;
-      if (isStale()) return;
+      // 3. 미입고 차수 계산
+      const confirmedWaves = new Set((receiptLogs || []).map((r: any) => r.summary?.wave ?? 1));
+      const pendingWaves = (shipmentLogs || []).filter((s: any) => !confirmedWaves.has(s.summary?.wave ?? 1));
 
-      // 단품 단위로 집계
-      const componentMap: Record<string, { skuId: string; skuName: string; barcode: string | null; qty: number; isMarking: boolean }> = {};
+      setPendingWaveCount(pendingWaves.length);
 
-      for (const line of (lines || []) as any[]) {
-        if (line.needs_marking) {
-          const boms = (bomData || []).filter((b: any) => b.finished_sku_id === line.finished_sku_id);
-          for (const bom of boms as any[]) {
-            const key = bom.component_sku_id;
-            if (!componentMap[key]) {
-              componentMap[key] = {
-                skuId: bom.component_sku_id,
-                skuName: bom.component?.sku_name || '',
-                barcode: bom.component?.barcode || null,
-                qty: 0,
-                isMarking:
-                  bom.component_sku_id?.includes('MK') ||
-                  bom.component?.sku_name?.includes('마킹') ||
-                  false,
-              };
-            }
-            componentMap[key].qty += bom.quantity * line.sent_qty;
-          }
-        } else {
-          const key = line.finished_sku_id;
-          if (!componentMap[key]) {
-            componentMap[key] = {
-              skuId: line.finished_sku_id,
-              skuName: line.finished_sku?.sku_name || line.finished_sku_id,
-              barcode: line.finished_sku?.barcode || null,
-              qty: 0,
-              isMarking:
-                line.finished_sku_id?.includes('MK') ||
-                line.finished_sku?.sku_name?.includes('마킹') ||
-                false,
-            };
-          }
-          componentMap[key].qty += line.sent_qty;
-        }
+      if (pendingWaves.length === 0) {
+        // 미입고 차수 없음 -> 이미 모두 입고 완료
+        setItems([]);
+        setCurrentWaveNum(0);
+        setLoading(false);
+        return;
       }
 
-      setItems(
-        Object.values(componentMap).map((c) => ({
-          skuId: c.skuId,
-          skuName: c.skuName,
-          barcode: c.barcode,
-          expectedQty: c.qty,
-          actualQty: c.qty,
-          isMarking: c.isMarking,
-        }))
-      );
+      // 가장 오래된 미입고 차수
+      const currentWave = pendingWaves[0];
+      const waveNum = currentWave.summary?.wave ?? 1;
+      setCurrentWaveNum(waveNum);
+
+      const waveItems: { skuId: string; skuName: string; sentQty: number }[] = currentWave.summary?.items || [];
+
+      if (waveItems.length === 0) {
+        setItems([]);
+        setLoading(false);
+        return;
+      }
+
+      // barcode 조회를 위해 SKU 테이블에서 가져오기
+      const skuIds = waveItems.map((i) => i.skuId);
+      const { data: skuData } = await supabase
+        .from('sku')
+        .select('sku_id, barcode')
+        .in('sku_id', skuIds);
+      if (isStale()) return;
+
+      const barcodeMap: Record<string, string | null> = {};
+      for (const s of (skuData || []) as any[]) {
+        barcodeMap[s.sku_id] = s.barcode || null;
+      }
+
+      // waveItems가 곧 expectedQty (발송 시 이미 단품으로 전개됨)
+      setItems(waveItems.map((item) => ({
+        skuId: item.skuId,
+        skuName: item.skuName,
+        barcode: barcodeMap[item.skuId] || null,
+        expectedQty: item.sentQty,
+        actualQty: item.sentQty,
+        isMarking: item.skuId?.includes('MK') || item.skuName?.includes('마킹') || false,
+      })));
     } catch (e: any) {
       if (!isStale()) setError(`입고 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
@@ -313,7 +351,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
         barcode: item.barcode,
         qty: item.actualQty,
       })),
-      `입고수량_${selectedOrder?.download_date || '양식'}.xlsx`
+      `입고수량_${selectedOrder?.download_date || '양식'}_${currentWaveNum}차.xlsx`
     );
   };
 
@@ -361,10 +399,12 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
     setSaveProgress(null);
     setError(null);
     try {
-      setSaveProgress({ current: 1, total: 4, step: '데이터 조회 중...' });
+      setSaveProgress({ current: 1, total: 5, step: '데이터 조회 중...' });
+
+      // work_order_line 조회 (received_qty 포함)
       const { data: lines, error: linesErr } = await supabase
         .from('work_order_line')
-        .select('id, finished_sku_id, ordered_qty, needs_marking')
+        .select('id, finished_sku_id, ordered_qty, sent_qty, received_qty, needs_marking')
         .eq('work_order_id', selectedOrder.id);
       if (linesErr) throw linesErr;
 
@@ -372,23 +412,49 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       const actualMap: Record<string, number> = {};
       for (const item of items) actualMap[item.skuId] = item.actualQty;
 
+      // BOM 조회 (needs_marking=true 라인의 역산용)
+      const markingSkuIds = lineList
+        .filter((l) => l.needs_marking)
+        .map((l) => l.finished_sku_id as string);
+      let bomData: any[] = [];
+      if (markingSkuIds.length > 0) {
+        const { data: bomResult } = await supabase
+          .from('bom')
+          .select('finished_sku_id, component_sku_id, quantity')
+          .in('finished_sku_id', markingSkuIds);
+        bomData = bomResult || [];
+      }
+
       const BATCH = 10;
       const lineBatches = Math.ceil(lineList.length / BATCH);
       const activeItems = items.filter((i) => i.actualQty > 0);
       const itemBatches = Math.ceil(activeItems.length / BATCH);
-      const stepsTotal = lineBatches + itemBatches + 3;
+      const stepsTotal = lineBatches + itemBatches + 4;
       let progressStep = 1;
 
-      // ── received_qty 업데이트 (배치 병렬) ──
+      // ── received_qty 업데이트 (차수별 누적) ──
+      setSaveProgress({ current: 2, total: stepsTotal, step: '입고 수량 처리 중...' });
       for (let i = 0; i < lineList.length; i += BATCH) {
         const batch = lineList.slice(i, i + BATCH);
         progressStep++;
         setSaveProgress({ current: progressStep, total: stepsTotal, step: `입고 수량 처리 중... (${Math.min(i + BATCH, lineList.length)} / ${lineList.length})` });
         await Promise.all(batch.map((line: any) => {
-          const receivedQty = line.needs_marking
-            ? line.ordered_qty
-            : (actualMap[line.finished_sku_id] ?? line.ordered_qty);
-          return supabase.from('work_order_line').update({ received_qty: receivedQty }).eq('id', line.id);
+          let thisWaveQty: number;
+          if (line.needs_marking) {
+            // BOM 유니폼 구성품의 actualQty로 역산
+            const boms = bomData.filter((b: any) => b.finished_sku_id === line.finished_sku_id);
+            const uniformComp = boms.find((b: any) => !b.component_sku_id?.includes('MK'));
+            if (uniformComp) {
+              thisWaveQty = Math.round((actualMap[uniformComp.component_sku_id] || 0) / (uniformComp.quantity || 1));
+            } else {
+              const anyComp = boms[0];
+              thisWaveQty = anyComp ? Math.round((actualMap[anyComp.component_sku_id] || 0) / (anyComp.quantity || 1)) : 0;
+            }
+          } else {
+            thisWaveQty = actualMap[line.finished_sku_id] ?? 0;
+          }
+          const newReceivedQty = (line.received_qty || 0) + thisWaveQty;
+          return supabase.from('work_order_line').update({ received_qty: newReceivedQty }).eq('id', line.id);
         }));
       }
 
@@ -426,21 +492,29 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
               txType: '입고',
               quantity: item.actualQty,
               source: 'system',
-              memo: `입고확인 (작업지시서 ${selectedOrder.download_date})`,
+              memo: `입고확인 ${currentWaveNum}차 (작업지시서 ${selectedOrder.download_date})`,
             });
           }));
         }
       }
 
-      // ── 상태 업데이트 ──
-      setSaveProgress({ current: stepsTotal, total: stepsTotal, step: '상태 업데이트 중...' });
-      const { error: statusErr } = await supabase
-        .from('work_order')
-        .update({ status: '입고확인완료' })
-        .eq('id', selectedOrder.id);
-      if (statusErr) throw statusErr;
+      // ── 상태 전이: 미입고 차수 남았으면 유지, 모두 완료면 입고확인완료 ──
+      progressStep++;
+      setSaveProgress({ current: progressStep, total: stepsTotal, step: '상태 업데이트 중...' });
 
-      // Activity log
+      // 이번 차수 입고 후 남은 미입고 차수 확인
+      const remainingPendingAfterThis = pendingWaveCount - 1;
+      if (remainingPendingAfterThis <= 0) {
+        // 모든 차수 입고 완료
+        const { error: statusErr } = await supabase
+          .from('work_order')
+          .update({ status: '입고확인완료' })
+          .eq('id', selectedOrder.id);
+        if (statusErr) throw statusErr;
+      }
+      // 미입고 차수가 남아있으면 상태 변경 안함 (이관중 유지)
+
+      // Activity log (wave 번호 포함)
       try {
         await supabase.from('activity_log').insert({
           user_id: currentUser.id,
@@ -448,6 +522,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
           work_order_id: selectedOrder.id,
           action_date: new Date().toISOString().split('T')[0],
           summary: {
+            wave: currentWaveNum,
             items: items.map((i) => ({ skuId: i.skuId, skuName: i.skuName, actualQty: i.actualQty })),
             totalQty: items.reduce((s, i) => s + i.actualQty, 0),
             workOrderDate: selectedOrder.download_date,
@@ -772,10 +847,19 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
         >
           {orders.map((wo) => (
             <option key={wo.id} value={wo.id}>
-              {wo.download_date}
+              {wo.download_date} (미입고 {wo.pendingWaveCount}차수)
             </option>
           ))}
         </select>
+      )}
+
+      {/* 미입고 차수 안내 배너 */}
+      {pendingWaveCount > 1 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+          <p className="text-sm text-amber-800">
+            미입고 차수가 {pendingWaveCount}개 있습니다. {currentWaveNum}차부터 순서대로 입고해주세요.
+          </p>
+        </div>
       )}
 
       {/* 엑셀 버튼 */}
@@ -823,22 +907,29 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       {/* 품목 카드 — 유니폼/마킹 좌우 2컬럼 */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-50">
-          <h3 className="font-medium text-gray-900">📬 입고 확인 — {selectedOrder?.download_date}</h3>
+          <h3 className="font-medium text-gray-900">
+            {currentWaveNum}차 입고 확인 — {selectedOrder?.download_date}
+            {pendingWaveCount > 1 && (
+              <span className="text-xs text-amber-600 ml-2">
+                (미입고 {pendingWaveCount}차수)
+              </span>
+            )}
+          </h3>
           <p className="text-xs text-gray-400 mt-0.5">실제 입고된 수량을 입력하세요</p>
         </div>
 
         {/* 총 수량 합계 */}
         <div className="px-5 py-3 bg-blue-50/60 border-b border-gray-100 space-y-1">
           <div className="flex items-center justify-between text-sm">
-            <span className="text-blue-700">👕 유니폼 소계</span>
+            <span className="text-blue-700">유니폼 소계</span>
             <span className="font-semibold text-blue-800">{totalUniformQty}개</span>
           </div>
           <div className="flex items-center justify-between text-sm">
-            <span className="text-purple-700">🎨 마킹 소계</span>
+            <span className="text-purple-700">마킹 소계</span>
             <span className="font-semibold text-purple-800">{totalMarkingQty}개</span>
           </div>
           <div className="border-t border-blue-200 pt-1 mt-1 flex items-center justify-between text-sm">
-            <span className="font-bold text-gray-800">📬 총 입고 수량</span>
+            <span className="font-bold text-gray-800">총 입고 수량</span>
             <span className="font-bold text-gray-900 text-base">{totalReceiptQty}개</span>
           </div>
         </div>
@@ -847,7 +938,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
         <div className="grid grid-cols-2 border-b border-gray-100">
           <div className="px-4 py-2.5 border-r border-gray-100 bg-blue-50">
             <p className="text-xs font-semibold text-blue-700">
-              👕 유니폼 단품{' '}
+              유니폼 단품{' '}
               <span className="font-normal text-blue-500">
                 ({items.filter((i) => !i.isMarking).length}종)
               </span>
@@ -855,7 +946,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
           </div>
           <div className="px-4 py-2.5 bg-purple-50">
             <p className="text-xs font-semibold text-purple-700">
-              🎨 마킹 단품{' '}
+              마킹 단품{' '}
               <span className="font-normal text-purple-500">
                 ({items.filter((i) => i.isMarking).length}종)
               </span>
@@ -991,7 +1082,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
         disabled={saving}
         className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-60 transition-colors text-base"
       >
-        {saving ? '처리 중...' : '입고 확인 완료'}
+        {saving ? '처리 중...' : `${currentWaveNum}차 입고 확인 완료`}
       </button>
       </>}
     </div>
