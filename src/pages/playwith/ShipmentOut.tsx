@@ -5,6 +5,7 @@ import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, FileUp, Trash2, Truck, Info } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
+import { TableSkeleton } from '../../components/LoadingSkeleton';
 import type { AppUser } from '../../types';
 
 interface ShipmentOutItem {
@@ -86,47 +87,50 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
     setUploadComparison(null);
     setXlsxError(null);
     try {
-      // 1. 작업지시서 라인 조회
-      const { data: lines, error: linesErr } = await supabase
-        .from('work_order_line')
-        .select('id, finished_sku_id, ordered_qty, received_qty, marked_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
-        .eq('work_order_id', wo.id);
-      if (linesErr) throw linesErr;
+      // 1단계: work_order_line + warehouse 병렬 조회
+      const [linesResult, warehouseResult] = await Promise.all([
+        supabase
+          .from('work_order_line')
+          .select('id, finished_sku_id, ordered_qty, received_qty, marked_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
+          .eq('work_order_id', wo.id),
+        supabase
+          .from('warehouse')
+          .select('id')
+          .eq('name', '플레이위즈')
+          .maybeSingle(),
+      ]);
+      if (linesResult.error) throw linesResult.error;
+      if (warehouseResult.error) throw warehouseResult.error;
       if (isStale()) return;
-      const lineList = (lines || []) as any[];
 
-      // 2. daily_marking 합산 (마킹 완성품의 실제 완료 수량)
+      const lineList = (linesResult.data || []) as any[];
+      const warehouseId = (warehouseResult.data as any)?.id;
+
+      // 2단계: daily_marking + inventory 병렬 조회 (각각 1단계 결과 필요)
       const lineIds = lineList.map((l) => l.id);
+      const [markingsResult, inventoryResult] = await Promise.all([
+        lineIds.length > 0
+          ? supabase
+              .from('daily_marking')
+              .select('work_order_line_id, completed_qty')
+              .in('work_order_line_id', lineIds)
+          : Promise.resolve({ data: [] as any[], error: null }),
+        supabase
+          .from('inventory')
+          .select('sku_id, quantity')
+          .eq('warehouse_id', warehouseId),
+      ]);
+      if (markingsResult.error) throw markingsResult.error;
+      if (inventoryResult.error) throw inventoryResult.error;
+      if (isStale()) return;
+
       let markingTotals: Record<string, number> = {};
-      if (lineIds.length > 0) {
-        const { data: markings, error: markErr } = await supabase
-          .from('daily_marking')
-          .select('work_order_line_id, completed_qty')
-          .in('work_order_line_id', lineIds);
-        if (markErr) throw markErr;
-        if (isStale()) return;
-        for (const m of (markings || []) as any[]) {
-          markingTotals[m.work_order_line_id] =
-            (markingTotals[m.work_order_line_id] || 0) + m.completed_qty;
-        }
+      for (const m of (markingsResult.data || []) as any[]) {
+        markingTotals[m.work_order_line_id] =
+          (markingTotals[m.work_order_line_id] || 0) + m.completed_qty;
       }
 
-      // 3. 플레이위즈 창고 재고 조회
-      const { data: warehouse, error: whErr } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', '플레이위즈')
-        .maybeSingle();
-      if (whErr) throw whErr;
-      if (isStale()) return;
-
-      const warehouseId = (warehouse as any)?.id;
-      const { data: inventoryData, error: invErr } = await supabase
-        .from('inventory')
-        .select('sku_id, quantity')
-        .eq('warehouse_id', warehouseId);
-      if (invErr) throw invErr;
-      if (isStale()) return;
+      const inventoryData = inventoryResult.data;
 
       const inventoryMap: Record<string, number> = {};
       for (const inv of (inventoryData || []) as any[]) {
@@ -420,7 +424,12 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
   };
 
   if (loading) {
-    return <div className="flex items-center justify-center h-64 text-gray-400">불러오는 중...</div>;
+    return (
+      <div className="space-y-6">
+        <h2 className="text-xl font-bold text-gray-900">출고 확인</h2>
+        <TableSkeleton rows={6} />
+      </div>
+    );
   }
 
   const noWorkToday = (workOrders.length === 0 && !confirmed) || confirmed;

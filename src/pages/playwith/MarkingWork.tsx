@@ -4,6 +4,7 @@ import { recordTransaction, deleteSystemTransactions } from '../../lib/inventory
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
+import { TableSkeleton } from '../../components/LoadingSkeleton';
 import type { AppUser } from '../../types';
 import {
   AlertTriangle,
@@ -137,33 +138,36 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       const lineIds = ((lines || []) as any[]).map((l: any) => l.id);
       setAllLineIds(lineIds);
 
-      // BOM 로드 (마킹 시 구성품 재고 변경용)
+      // BOM + daily_marking 병렬 조회 (둘 다 1단계 lines 결과에만 의존)
       const markingSkuIds = ((lines || []) as any[]).map((l: any) => l.finished_sku_id as string);
-      const { data: bomData, error: bomErr } = await supabase
-        .from('bom')
-        .select('finished_sku_id, component_sku_id, quantity')
-        .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']);
-      if (bomErr) throw bomErr;
+
+      const [bomResult, markingResult] = await Promise.all([
+        // BOM 로드 (마킹 시 구성품 재고 변경용)
+        supabase
+          .from('bom')
+          .select('finished_sku_id, component_sku_id, quantity')
+          .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']),
+        // 전체 daily_marking 조회 (이월 판별용)
+        lineIds.length > 0
+          ? supabase
+              .from('daily_marking')
+              .select('work_order_line_id, completed_qty, date')
+              .in('work_order_line_id', lineIds)
+          : Promise.resolve({ data: [] as any[], error: null }),
+      ]);
+
+      if (bomResult.error) throw bomResult.error;
+      if (markingResult.error) throw markingResult.error;
       if (isStale()) return;
 
       const bMap: Record<string, { componentSkuId: string; quantity: number }[]> = {};
-      for (const b of (bomData || []) as any[]) {
+      for (const b of (bomResult.data || []) as any[]) {
         if (!bMap[b.finished_sku_id]) bMap[b.finished_sku_id] = [];
         bMap[b.finished_sku_id].push({ componentSkuId: b.component_sku_id, quantity: b.quantity });
       }
       setBomMap(bMap);
 
-      // 전체 daily_marking 조회 (이월 판별용)
-      let allMarkings: any[] = [];
-      if (lineIds.length > 0) {
-        const { data: markings, error: markingErr } = await supabase
-          .from('daily_marking')
-          .select('work_order_line_id, completed_qty, date')
-          .in('work_order_line_id', lineIds);
-        if (markingErr) throw markingErr;
-        if (isStale()) return;
-        allMarkings = (markings || []) as any[];
-      }
+      const allMarkings = (markingResult.data || []) as any[];
 
       const todayMap: Record<string, number> = {};
       const hasHistory = new Set<string>();
@@ -677,7 +681,12 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   // ── 로딩 ──
 
   if (loading) {
-    return <div className="flex items-center justify-center h-64 text-gray-400">불러오는 중...</div>;
+    return (
+      <div className="space-y-6">
+        <h2 className="text-xl font-bold text-gray-900">마킹 작업</h2>
+        <TableSkeleton rows={6} />
+      </div>
+    );
   }
 
   if (orders.length === 0) {

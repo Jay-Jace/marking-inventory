@@ -5,6 +5,7 @@ import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, Edit3, FileUp, Trash2, Truck, XCircle } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
+import { TwoColumnSkeleton } from '../../components/LoadingSkeleton';
 import type { AppUser } from '../../types';
 
 interface ShipmentItem {
@@ -126,39 +127,37 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
     setUploadComparison(null);
     setXlsxError(null);
     try {
-      const { data: lines, error: linesErr } = await supabase
-        .from('work_order_line')
-        .select('id, finished_sku_id, ordered_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
-        .eq('work_order_id', wo.id);
-      if (linesErr) throw linesErr;
+      // 1단계: lines + warehouse 병렬 조회
+      const [linesResult, warehouseResult] = await Promise.all([
+        supabase.from('work_order_line')
+          .select('id, finished_sku_id, ordered_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
+          .eq('work_order_id', wo.id),
+        supabase.from('warehouse').select('id').eq('name', '오프라인샵').maybeSingle(),
+      ]);
+      if (linesResult.error) throw linesResult.error;
+      if (warehouseResult.error) throw warehouseResult.error;
       if (isStale()) return;
 
-      const { data: warehouses, error: warehouseErr } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', '오프라인샵')
-        .maybeSingle();
-      if (warehouseErr) throw warehouseErr;
-      if (isStale()) return;
+      const lines = linesResult.data;
+      const offlineWarehouseId = (warehouseResult.data as any)?.id;
 
-      const offlineWarehouseId = (warehouses as any)?.id;
-
+      // 2단계: BOM + inventory 병렬 조회 (각각 lines, warehouse 결과 필요)
       const markingSkuIds = ((lines || []) as any[])
-        .filter((l) => l.needs_marking)
-        .map((l) => l.finished_sku_id as string);
-      const { data: bomData, error: bomErr } = await supabase
-        .from('bom')
-        .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, barcode)')
-        .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']);
-      if (bomErr) throw bomErr;
+        .filter((l: any) => l.needs_marking)
+        .map((l: any) => l.finished_sku_id as string);
+
+      const [bomResult, invResult] = await Promise.all([
+        supabase.from('bom')
+          .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, barcode)')
+          .in('finished_sku_id', markingSkuIds.length > 0 ? markingSkuIds : ['__none__']),
+        supabase.from('inventory').select('sku_id, quantity').eq('warehouse_id', offlineWarehouseId),
+      ]);
+      if (bomResult.error) throw bomResult.error;
+      if (invResult.error) throw invResult.error;
       if (isStale()) return;
 
-      const { data: inventoryData, error: invErr } = await supabase
-        .from('inventory')
-        .select('sku_id, quantity')
-        .eq('warehouse_id', offlineWarehouseId);
-      if (invErr) throw invErr;
-      if (isStale()) return;
+      const bomData = bomResult.data;
+      const inventoryData = invResult.data;
 
       const inventoryMap: Record<string, number> = {};
       for (const inv of (inventoryData || []) as any[]) {
@@ -649,7 +648,12 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
   // ── 렌더링 ──
 
   if (loading) {
-    return <div className="flex items-center justify-center h-64 text-gray-400">불러오는 중...</div>;
+    return (
+      <div className="space-y-6">
+        <h2 className="text-xl font-bold text-gray-900">발송 확인</h2>
+        <TwoColumnSkeleton />
+      </div>
+    );
   }
 
   const noWorkToday = (workOrders.length === 0 && !confirmed) || confirmed;

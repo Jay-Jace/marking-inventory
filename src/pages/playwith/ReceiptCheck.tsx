@@ -6,6 +6,7 @@ import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, FileUp
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import type { AppUser } from '../../types';
+import { TwoColumnSkeleton } from '../../components/LoadingSkeleton';
 
 interface ReceiptItem {
   skuId: string;
@@ -449,7 +450,12 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
   };
 
   if (loading) {
-    return <div className="flex items-center justify-center h-64 text-gray-400">불러오는 중...</div>;
+    return (
+      <div className="space-y-6">
+        <h2 className="text-xl font-bold text-gray-900">입고 확인</h2>
+        <TwoColumnSkeleton />
+      </div>
+    );
   }
 
   const noWorkToday = (orders.length === 0 && !done) || done;

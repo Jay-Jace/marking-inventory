@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { Trash2, AlertTriangle, CheckCircle, XCircle, Eye, RotateCcw, Settings } from 'lucide-react';
+import { CardSkeleton } from '../../components/LoadingSkeleton';
 import {
   getSteps,
   getStepStates,
@@ -405,8 +406,9 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64 text-gray-500">
-        불러오는 중...
+      <div className="space-y-6">
+        <h2 className="text-xl font-bold text-gray-900">대시보드</h2>
+        <CardSkeleton count={3} />
       </div>
     );
   }
