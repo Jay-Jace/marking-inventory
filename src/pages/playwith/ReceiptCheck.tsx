@@ -1,6 +1,7 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { recordTransaction, deleteSystemTransactions } from '../../lib/inventoryTransaction';
+import { type ProgressCallback } from '../../lib/workOrderRollback';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, FileUp, Trash2 } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
@@ -47,6 +48,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
   const [historyWorkOrder, setHistoryWorkOrder] = useState<{ id: string; date: string; status: string; markingStarted: boolean } | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [rollbackProgress, setRollbackProgress] = useState<{current:number;total:number;step:string}|null>(null);
 
   useEffect(() => {
     loadOrders();
@@ -213,8 +215,13 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
     if (!historyWorkOrder) return;
     setDeleting(true);
     setError(null);
+    setRollbackProgress(null);
+    const onProgress: ProgressCallback = (current, total, step) => {
+      setRollbackProgress({ current, total, step });
+    };
     try {
       // 1) work_order_line.received_qty → 0 초기화
+      onProgress(1, 5, 'received_qty 초기화 중...');
       const { data: lines } = await supabase
         .from('work_order_line')
         .select('id')
@@ -227,12 +234,14 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       }
 
       // 2) work_order.status → '이관중' 복원
+      onProgress(2, 5, '상태 복원 중...');
       await supabase
         .from('work_order')
         .update({ status: '이관중' })
         .eq('id', historyWorkOrder.id);
 
       // 3) inventory_transaction 삭제 + inventory 역반영
+      onProgress(3, 5, '재고 트랜잭션 삭제 중...');
       const { data: warehouse } = await supabase
         .from('warehouse')
         .select('id')
@@ -246,6 +255,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       }
 
       // 4) activity_log에 삭제 이력 기록
+      onProgress(4, 5, '삭제 이력 기록 중...');
       await supabase.from('activity_log').insert({
         user_id: currentUser.id,
         action_type: 'delete_receipt',
@@ -260,6 +270,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       });
 
       // 5) UI 초기화
+      onProgress(5, 5, '완료!');
       setHistoryItems([]);
       setHistoryWorkOrder(null);
       setShowDeleteModal(false);
@@ -268,6 +279,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       setError(`삭제 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
       setDeleting(false);
+      setRollbackProgress(null);
     }
   };
 
@@ -586,6 +598,18 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
                   <p>삭제 대상: <span className="font-medium">{historyItems.length}종 / {historyItems.reduce((s, h) => s + h.qty, 0)}개</span></p>
                 </div>
               </div>
+              {deleting && rollbackProgress && (
+                <div className="px-6 py-3">
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-3 space-y-2">
+                    <p className="text-xs text-red-700 font-medium text-center">{rollbackProgress.step}</p>
+                    <div className="w-full bg-red-200 rounded-full h-2 overflow-hidden">
+                      <div className="bg-red-600 h-2 rounded-full transition-all duration-300"
+                        style={{ width: `${Math.round((rollbackProgress.current / rollbackProgress.total) * 100)}%` }} />
+                    </div>
+                    <p className="text-[10px] text-red-500 text-center">{rollbackProgress.current} / {rollbackProgress.total}</p>
+                  </div>
+                </div>
+              )}
               <div className="px-6 py-4 border-t border-gray-100 flex gap-3">
                 <button onClick={() => setShowDeleteModal(false)} disabled={deleting} className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50">취소</button>
                 <button onClick={handleDeleteReceipt} disabled={deleting} className="flex-1 py-2.5 bg-red-500 text-white rounded-lg text-sm font-medium hover:bg-red-600 transition-colors disabled:opacity-50">

@@ -2,6 +2,7 @@ import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { recordTransactionBatch, deleteSystemTransactions } from '../../lib/inventoryTransaction';
 import type { RecordTxParams } from '../../lib/inventoryTransaction';
+import type { ProgressCallback } from '../../lib/workOrderRollback';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
@@ -87,6 +88,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deletePreview, setDeletePreview] = useState<{ lineId: string; skuName: string; qty: number }[]>([]);
+  const [rollbackProgress, setRollbackProgress] = useState<{current:number;total:number;step:string}|null>(null);
 
   useEffect(() => {
     loadOrders();
@@ -504,8 +506,14 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   const handleDeleteMarking = async () => {
     if (!selectedOrder || deletePreview.length === 0) return;
     setDeleting(true);
+    setRollbackProgress(null);
     setError(null);
+    const totalSteps = 7;
+    const onProgress: ProgressCallback = (current, total, step) => {
+      setRollbackProgress({ current, total, step });
+    };
     try {
+      onProgress(1, totalSteps, '창고 정보 조회 중...');
       const { data: pwWarehouse } = await supabase
         .from('warehouse')
         .select('id')
@@ -513,6 +521,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         .maybeSingle();
       const pwWhId = (pwWarehouse as any)?.id;
 
+      onProgress(2, totalSteps, '마킹 기록 조회 및 삭제 중...');
       for (const item of deletePreview) {
         // 1) daily_marking 해당 날짜 레코드 조회
         const { data: dailyRecord } = await supabase
@@ -594,7 +603,12 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           .eq('id', (dailyRecord as any).id);
       }
 
+      onProgress(3, totalSteps, 'marked_qty 업데이트 완료');
+      onProgress(4, totalSteps, '재고 복원 완료');
+      onProgress(5, totalSteps, '트랜잭션 삭제 완료');
+
       // 6) work_order 상태 체크 (마킹중이었는지)
+      onProgress(6, totalSteps, '상태 확인 중...');
       const { data: woCheck } = await supabase
         .from('work_order')
         .select('status')
@@ -617,6 +631,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       }
 
       // 7) activity_log 기록
+      onProgress(7, totalSteps, '이력 기록 중...');
       await supabase.from('activity_log').insert({
         user_id: currentUser.id,
         action_type: 'delete_marking',
@@ -639,6 +654,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       setError(`삭제 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
       setDeleting(false);
+      setRollbackProgress(null);
     }
   };
 
@@ -929,6 +945,18 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
                 ))}
               </div>
             </div>
+            {deleting && rollbackProgress && (
+              <div className="px-6 py-3">
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3 space-y-2">
+                  <p className="text-xs text-red-700 font-medium text-center">{rollbackProgress.step}</p>
+                  <div className="w-full bg-red-200 rounded-full h-2 overflow-hidden">
+                    <div className="bg-red-600 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${Math.round((rollbackProgress.current / rollbackProgress.total) * 100)}%` }} />
+                  </div>
+                  <p className="text-[10px] text-red-500 text-center">{rollbackProgress.current} / {rollbackProgress.total}</p>
+                </div>
+              </div>
+            )}
             <div className="px-6 py-4 border-t border-gray-100 flex gap-3">
               <button onClick={() => setShowDeleteModal(false)} disabled={deleting} className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50">취소</button>
               <button onClick={handleDeleteMarking} disabled={deleting} className="flex-1 py-2.5 bg-red-500 text-white rounded-lg text-sm font-medium hover:bg-red-600 transition-colors disabled:opacity-50">

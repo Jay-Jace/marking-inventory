@@ -1,6 +1,7 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
-import { recordTransaction, deleteSystemTransactions } from '../../lib/inventoryTransaction';
+import { recordTransaction } from '../../lib/inventoryTransaction';
+import { rollbackShipmentOut, type ProgressCallback } from '../../lib/workOrderRollback';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, FileUp, Trash2, Truck, Info } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
@@ -50,6 +51,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
   const [historyWorkOrder, setHistoryWorkOrder] = useState<{ id: string; date: string; status: string } | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [rollbackProgress, setRollbackProgress] = useState<{ current: number; total: number; step: string } | null>(null);
 
   useEffect(() => {
     loadPendingOrders();
@@ -224,42 +226,25 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
   const handleDeleteShipmentOut = async () => {
     if (!historyWorkOrder) return;
     setDeleting(true);
+    setRollbackProgress(null);
     setError(null);
     try {
-      // 1) work_order.status → '마킹완료' 복원
-      await supabase
-        .from('work_order')
-        .update({ status: '마킹완료' })
-        .eq('id', historyWorkOrder.id);
+      const onProgress: ProgressCallback = (current, total, step) => {
+        setRollbackProgress({ current, total, step });
+      };
 
-      // 2) inventory_transaction 삭제 + inventory 역반영
-      const { data: warehouse } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', '플레이위즈')
-        .maybeSingle();
-      if (warehouse) {
-        await deleteSystemTransactions({
-          warehouseId: (warehouse as any).id,
-          memo: `출고확인 (작업지시서 ${historyWorkOrder.date})`,
-        });
+      const result = await rollbackShipmentOut(
+        historyWorkOrder.id,
+        historyWorkOrder.date,
+        currentUser.id,
+        onProgress
+      );
+
+      if (!result.success) {
+        throw new Error(result.error || '롤백 실패');
       }
 
-      // 3) activity_log에 삭제 이력 기록
-      await supabase.from('activity_log').insert({
-        user_id: currentUser.id,
-        action_type: 'delete_shipment_out',
-        work_order_id: historyWorkOrder.id,
-        action_date: today,
-        summary: {
-          items: historyItems.map((h) => ({ skuName: h.skuName, shipQty: h.qty })),
-          totalQty: historyItems.reduce((s, h) => s + h.qty, 0),
-          workOrderDate: historyWorkOrder.date,
-          deletedDate: selectedDate,
-        },
-      });
-
-      // 4) UI 초기화
+      // UI 초기화
       setHistoryItems([]);
       setHistoryWorkOrder(null);
       setShowDeleteModal(false);
@@ -268,6 +253,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       setError(`삭제 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
       setDeleting(false);
+      setRollbackProgress(null);
     }
   };
 
@@ -349,13 +335,16 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       const totalSteps = Math.ceil(activeItems.length / BATCH) + 3;
       let step = 1;
 
-      // 1. 상태 '출고완료'로 업데이트
+      // 1. 상태 업데이트 (마킹완료→출고완료, 마킹중→유지)
       setConfirmProgress({ current: step, total: totalSteps, step: '출고 상태 업데이트 중...' });
-      const { error: statusErr } = await supabase
-        .from('work_order')
-        .update({ status: '출고완료' })
-        .eq('id', selectedWo.id);
-      if (statusErr) throw statusErr;
+      if (selectedWo.status === '마킹완료') {
+        const { error: statusErr } = await supabase
+          .from('work_order')
+          .update({ status: '출고완료' })
+          .eq('id', selectedWo.id);
+        if (statusErr) throw statusErr;
+      }
+      // 마킹중 상태는 유지 (부분 출고)
       step++;
 
       // 2. 플레이위즈 창고 조회
@@ -556,6 +545,16 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
                   <p>작업지시서: <span className="font-medium">{historyWorkOrder?.date}</span></p>
                   <p>삭제 대상: <span className="font-medium">{historyItems.length}종 / {historyItems.reduce((s, h) => s + h.qty, 0)}개</span></p>
                 </div>
+                {deleting && rollbackProgress && (
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-3 space-y-2">
+                    <p className="text-xs text-red-700 font-medium text-center">{rollbackProgress.step}</p>
+                    <div className="w-full bg-red-200 rounded-full h-2 overflow-hidden">
+                      <div className="bg-red-600 h-2 rounded-full transition-all duration-300"
+                        style={{ width: `${Math.round((rollbackProgress.current / rollbackProgress.total) * 100)}%` }} />
+                    </div>
+                    <p className="text-[10px] text-red-500 text-center">{rollbackProgress.current} / {rollbackProgress.total}</p>
+                  </div>
+                )}
               </div>
               <div className="px-6 py-4 border-t border-gray-100 flex gap-3">
                 <button onClick={() => setShowDeleteModal(false)} disabled={deleting} className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50">취소</button>
@@ -571,6 +570,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
   }
 
   const isMarkingDone = selectedWo?.status === '마킹완료';
+  const isShipmentReady = selectedWo?.status === '마킹중' || selectedWo?.status === '마킹완료';
   const hasShortage = items.some((item) => item.isShortage);
   const markingItems = items.filter((i) => i.needsMarking);
   const directItems = items.filter((i) => !i.needsMarking);
@@ -682,6 +682,16 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
                 <p>작업지시서: <span className="font-medium">{historyWorkOrder?.date}</span></p>
                 <p>삭제 대상: <span className="font-medium">{historyItems.length}종 / {historyItems.reduce((s, h) => s + h.qty, 0)}개</span></p>
               </div>
+              {deleting && rollbackProgress && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3 space-y-2">
+                  <p className="text-xs text-red-700 font-medium text-center">{rollbackProgress.step}</p>
+                  <div className="w-full bg-red-200 rounded-full h-2 overflow-hidden">
+                    <div className="bg-red-600 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${Math.round((rollbackProgress.current / rollbackProgress.total) * 100)}%` }} />
+                  </div>
+                  <p className="text-[10px] text-red-500 text-center">{rollbackProgress.current} / {rollbackProgress.total}</p>
+                </div>
+              )}
             </div>
             <div className="px-6 py-4 border-t border-gray-100 flex gap-3">
               <button onClick={() => setShowDeleteModal(false)} disabled={deleting} className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors disabled:opacity-50">취소</button>
@@ -942,15 +952,19 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
 
       <button
         onClick={handleConfirm}
-        disabled={confirming || items.length === 0 || !isMarkingDone}
+        disabled={confirming || items.length === 0 || !isShipmentReady}
         className="w-full bg-emerald-600 text-white py-3.5 rounded-xl font-semibold hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 text-base"
       >
         <Truck size={20} />
-        {confirming ? '처리 중...' : '출고 완료 확인'}
+        {confirming ? '처리 중...' : isMarkingDone ? '출고 완료 확인' : '마킹 완료분 출고'}
       </button>
-      {!isMarkingDone ? (
+      {!isShipmentReady ? (
         <p className="text-xs text-center text-amber-600">
-          모든 마킹 작업 완료 후 출고가 가능합니다
+          마킹 작업이 시작되면 출고할 수 있습니다
+        </p>
+      ) : !isMarkingDone ? (
+        <p className="text-xs text-center text-blue-600">
+          마킹 완료된 수량만 출고됩니다
         </p>
       ) : (
         <p className="text-xs text-center text-gray-400">
