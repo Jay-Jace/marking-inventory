@@ -2,7 +2,7 @@ import { supabase } from './supabase';
 import { supabaseAdmin } from './supabaseAdmin';
 import type { TxType, TxSource } from '../types';
 
-interface RecordTxParams {
+export interface RecordTxParams {
   warehouseId: string;
   skuId: string;
   txType: TxType;

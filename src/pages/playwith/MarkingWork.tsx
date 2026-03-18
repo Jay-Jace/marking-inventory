@@ -1,6 +1,7 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
-import { recordTransaction, deleteSystemTransactions } from '../../lib/inventoryTransaction';
+import { recordTransactionBatch, deleteSystemTransactions } from '../../lib/inventoryTransaction';
+import type { RecordTxParams } from '../../lib/inventoryTransaction';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
@@ -345,140 +346,114 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     setError(null);
     try {
       const activeItems = items.filter((item) => item.todayQty > 0);
-      // 총 단계: 창고조회(1) + 아이템당(daily_marking+marked_qty+BOM구성품+완성품 = 각각 1) + 상태확인(1) + 상태업데이트(1)
-      const total = activeItems.length + 3;
-      let processed = 0;
+      if (activeItems.length === 0) return;
+      const totalSteps = 6;
 
-      // 플레이위즈 warehouse ID 조회 (1회)
-      const { data: pwWarehouse, error: pwWhErr } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', '플레이위즈')
-        .maybeSingle();
-      if (pwWhErr) throw pwWhErr;
-      const pwWhId = (pwWarehouse as any)?.id;
+      // ── 1단계: 데이터 일괄 조회 (병렬) ──
+      setSaveProgress({ current: 1, total: totalSteps, step: '데이터 조회 중...' });
+      const lineIds = activeItems.map((item) => item.lineId);
 
-      for (const item of activeItems) {
-        processed++;
-        setSaveProgress({ current: processed, total, step: `마킹 기록 저장 중... (${processed} / ${activeItems.length})` });
+      const [dmResult, lineResult, whResult] = await Promise.all([
+        supabase.from('daily_marking').select('id, work_order_line_id, completed_qty')
+          .eq('date', today).in('work_order_line_id', lineIds),
+        supabase.from('work_order_line').select('id, marked_qty').in('id', lineIds),
+        supabase.from('warehouse').select('id').eq('name', '플레이위즈').maybeSingle(),
+      ]);
 
-        // daily_marking 기록 (오늘 기존 기록 확인)
-        const { data: existing, error: existingErr } = await supabase
-          .from('daily_marking')
-          .select('id, completed_qty')
-          .eq('date', today)
-          .eq('work_order_line_id', item.lineId)
-          .maybeSingle();
-        if (existingErr) throw existingErr;
+      const existingDmMap = new Map(
+        ((dmResult.data || []) as any[]).map((dm: any) => [dm.work_order_line_id, dm])
+      );
+      const lineMap = new Map(
+        ((lineResult.data || []) as any[]).map((l: any) => [l.id, l.marked_qty || 0])
+      );
+      const pwWhId = (whResult.data as any)?.id;
 
+      // diff 계산 (메모리에서)
+      const diffs = activeItems.map((item) => {
+        const existing = existingDmMap.get(item.lineId);
         const previousQty = existing?.completed_qty || 0;
-        const diff = item.todayQty - previousQty;
+        return { ...item, diff: item.todayQty - previousQty, existing };
+      });
 
-        if (existing) {
-          const { error: updateErr } = await supabase
-            .from('daily_marking')
-            .update({ completed_qty: item.todayQty, sent_to_cj_qty: item.todayQty })
-            .eq('id', existing.id);
-          if (updateErr) throw updateErr;
-        } else {
-          const { error: insertErr } = await supabase.from('daily_marking').insert({
-            date: today,
-            work_order_line_id: item.lineId,
-            completed_qty: item.todayQty,
-            sent_to_cj_qty: item.todayQty,
-          });
-          if (insertErr) throw insertErr;
-        }
+      // ── 2단계: daily_marking 배치 처리 ──
+      setSaveProgress({ current: 2, total: totalSteps, step: '마킹 기록 저장 중...' });
+      const toInsert = diffs.filter((d) => !d.existing);
+      const toUpdate = diffs.filter((d) => d.existing);
 
-        // work_order_line marked_qty 업데이트
-        const { data: currentLine, error: lineReadErr } = await supabase
-          .from('work_order_line')
-          .select('marked_qty')
-          .eq('id', item.lineId)
-          .maybeSingle();
-        if (lineReadErr) throw lineReadErr;
+      // 신규 항목 일괄 삽입
+      if (toInsert.length > 0) {
+        const { error: insErr } = await supabase.from('daily_marking').insert(
+          toInsert.map((d) => ({
+            date: today, work_order_line_id: d.lineId,
+            completed_qty: d.todayQty, sent_to_cj_qty: d.todayQty,
+          }))
+        );
+        if (insErr) throw insErr;
+      }
 
-        const currentMarkedQty = currentLine?.marked_qty || 0;
-        const { error: lineUpdateErr } = await supabase
-          .from('work_order_line')
-          .update({ marked_qty: currentMarkedQty + diff })
-          .eq('id', item.lineId);
-        if (lineUpdateErr) throw lineUpdateErr;
+      // 기존 항목 배치 업데이트 (BATCH=10, Promise.all)
+      const BATCH = 10;
+      for (let i = 0; i < toUpdate.length; i += BATCH) {
+        const batch = toUpdate.slice(i, i + BATCH);
+        await Promise.all(batch.map((d) =>
+          supabase.from('daily_marking')
+            .update({ completed_qty: d.todayQty, sent_to_cj_qty: d.todayQty })
+            .eq('id', d.existing.id)
+        ));
+      }
 
-        // ── 재고 업데이트: 구성품 감소 + 완성품 증가 ──
-        if (diff !== 0 && pwWhId) {
-          const components = bomMap[item.finishedSkuId] || [];
+      // ── 3단계: work_order_line marked_qty 배치 업데이트 ──
+      setSaveProgress({ current: 3, total: totalSteps, step: 'marked_qty 업데이트 중...' });
+      for (let i = 0; i < diffs.length; i += BATCH) {
+        const batch = diffs.slice(i, i + BATCH);
+        await Promise.all(batch.map((d) => {
+          const currentMarkedQty = lineMap.get(d.lineId) || 0;
+          return supabase.from('work_order_line')
+            .update({ marked_qty: currentMarkedQty + d.diff })
+            .eq('id', d.lineId);
+        }));
+      }
 
-          // 구성품(component) 재고 감소
+      // ── 4단계: 재고 트랜잭션 일괄 기록 (recordTransactionBatch) ──
+      setSaveProgress({ current: 4, total: totalSteps, step: '재고 반영 중...' });
+      if (pwWhId) {
+        const txRows: RecordTxParams[] = [];
+        for (const d of diffs) {
+          if (d.diff === 0) continue;
+          const components = bomMap[d.finishedSkuId] || [];
+          // 구성품 마킹출고
           for (const comp of components) {
-            const deltaQty = comp.quantity * diff;
-            const { data: compInv } = await supabase
-              .from('inventory')
-              .select('quantity')
-              .eq('warehouse_id', pwWhId)
-              .eq('sku_id', comp.componentSkuId)
-              .maybeSingle();
-
-            const newCompQty = Math.max(0, ((compInv as any)?.quantity || 0) - deltaQty);
-            const { error: compErr } = await supabase
-              .from('inventory')
-              .upsert(
-                { warehouse_id: pwWhId, sku_id: comp.componentSkuId, quantity: newCompQty },
-                { onConflict: 'warehouse_id,sku_id' }
-              );
-            if (compErr) throw compErr;
-            // 수불부: 구성품 출고 기록
+            const deltaQty = comp.quantity * d.diff;
             if (deltaQty > 0) {
-              await recordTransaction({
-                warehouseId: pwWhId,
-                skuId: comp.componentSkuId,
-                txType: '마킹출고',
-                quantity: deltaQty,
-                source: 'system',
-                memo: `마킹작업 구성품 차감 (${item.finishedSkuId})`,
+              txRows.push({
+                warehouseId: pwWhId, skuId: comp.componentSkuId,
+                txType: '마킹출고', quantity: deltaQty, source: 'system',
+                memo: `마킹작업 구성품 차감 (${d.finishedSkuId})`,
               });
             }
           }
-
-          // 완성품(finished) 재고 증가
-          const { data: finInv } = await supabase
-            .from('inventory')
-            .select('quantity')
-            .eq('warehouse_id', pwWhId)
-            .eq('sku_id', item.finishedSkuId)
-            .maybeSingle();
-
-          const newFinQty = Math.max(0, ((finInv as any)?.quantity || 0) + diff);
-          const { error: finErr } = await supabase
-            .from('inventory')
-            .upsert(
-              { warehouse_id: pwWhId, sku_id: item.finishedSkuId, quantity: newFinQty },
-              { onConflict: 'warehouse_id,sku_id' }
-            );
-          if (finErr) throw finErr;
-          // 수불부: 완성품 입고 기록
-          if (diff > 0) {
-            await recordTransaction({
-              warehouseId: pwWhId,
-              skuId: item.finishedSkuId,
-              txType: '마킹입고',
-              quantity: diff,
-              source: 'system',
-              memo: `마킹작업 완성품 증가`,
+          // 완성품 마킹입고
+          if (d.diff > 0) {
+            txRows.push({
+              warehouseId: pwWhId, skuId: d.finishedSkuId,
+              txType: '마킹입고', quantity: d.diff, source: 'system',
+              memo: '마킹작업 완성품 증가',
             });
           }
         }
+        if (txRows.length > 0) {
+          await recordTransactionBatch(txRows);
+        }
       }
 
-      // 모두 완료됐으면 상태 업데이트
-      setSaveProgress({ current: total, total, step: '완료 상태 업데이트 중...' });
+      // ── 5단계: 상태 업데이트 ──
+      setSaveProgress({ current: 5, total: totalSteps, step: '완료 상태 업데이트 중...' });
       const { data: allLines, error: allLinesErr } = await supabase
         .from('work_order_line')
         .select('received_qty, marked_qty, needs_marking')
         .eq('work_order_id', selectedOrder.id);
       if (allLinesErr) throw allLinesErr;
 
-      // 마킹 필요 라인만 체크 (단품은 마킹 불필요)
       const allDone = ((allLines || []) as any[])
         .filter((l) => l.needs_marking)
         .every((l) => l.marked_qty >= l.received_qty);
@@ -489,7 +464,8 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         .eq('id', selectedOrder.id);
       if (statusErr) throw statusErr;
 
-      // Activity log
+      // ── 6단계: Activity log + 재조회 ──
+      setSaveProgress({ current: 6, total: totalSteps, step: '완료 처리 중...' });
       try {
         const logItems = activeItems.map((item) => ({
           skuId: item.finishedSkuId, skuName: item.skuName, completedQty: item.todayQty,
@@ -507,9 +483,8 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         });
       } catch (logErr) { console.warn('Activity log failed:', logErr); }
 
-      // DB 재조회로 완료 아이템 자동 제거 + 잔여 수량 갱신
       await selectOrder(selectedOrder);
-      setSaved(true); // selectOrder 내부에서 setSaved(false) 호출되므로 다시 설정
+      setSaved(true);
     } catch (e: any) {
       setError(`마킹 저장 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {
