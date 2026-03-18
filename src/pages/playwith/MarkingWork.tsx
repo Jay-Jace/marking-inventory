@@ -1,4 +1,5 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
+import * as XLSX from 'xlsx';
 import { supabase } from '../../lib/supabase';
 import { recordTransactionBatch, deleteSystemTransactions } from '../../lib/inventoryTransaction';
 import type { RecordTxParams } from '../../lib/inventoryTransaction';
@@ -90,7 +91,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
   // 작업 불가 리스트
   const [unavailableItems, setUnavailableItems] = useState<UnavailableItem[]>([]);
-  const [showUnavailable, setShowUnavailable] = useState(false);
+  const [showUnavailable, setShowUnavailable] = useState(true);
 
   // 내일 날짜 계산
   const tomorrowDate = (() => {
@@ -827,7 +828,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   // ── 렌더링 ──
 
   return (
-    <div className="space-y-5 max-w-5xl">
+    <div className="space-y-5 max-w-3xl">
       {/* 에러 */}
       {error && (
         <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
@@ -1153,9 +1154,6 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             </div>
           </div>
 
-          {/* 2컬럼 레이아웃: 작업 목록(왼쪽) + 작업 불가(오른쪽) */}
-          <div className={`grid gap-4 ${unavailableItems.length > 0 ? 'grid-cols-1 lg:grid-cols-[1fr_320px]' : 'grid-cols-1'}`}>
-
           {/* 작업 목록 카드 */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
             {items.length === 0 ? (
@@ -1203,41 +1201,57 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             )}
           </div>
 
-          {/* 작업 불가 리스트 (오른쪽 사이드 패널) */}
+          {/* 작업 불가 리스트 — 작업 목록과 동일 크기 */}
           {unavailableItems.length > 0 && (
-            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden self-start lg:sticky lg:top-4">
-              <button
-                onClick={() => setShowUnavailable(!showUnavailable)}
-                className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-100 text-sm font-medium text-gray-600 hover:bg-gray-100 transition-colors"
-              >
-                <div className="flex items-center gap-2">
+            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+              <div className="px-4 py-3 bg-yellow-50 border-b border-yellow-200 flex items-center justify-between">
+                <button
+                  onClick={() => setShowUnavailable(!showUnavailable)}
+                  className="flex items-center gap-2 text-sm font-medium text-yellow-800"
+                >
                   <AlertTriangle size={14} className="text-yellow-600" />
                   <span>작업 불가 ({unavailableItems.length}종)</span>
-                </div>
-                <div className="flex items-center gap-1 text-gray-400">
-                  <span className="text-xs">{showUnavailable ? '접기' : '펼치기'}</span>
-                  {showUnavailable ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                </div>
-              </button>
+                  {showUnavailable ? <ChevronUp size={14} className="text-yellow-500" /> : <ChevronDown size={14} className="text-yellow-500" />}
+                </button>
+                <button
+                  onClick={() => {
+                    const wsData = [
+                      ['SKU ID', '상품명', '사유', '주문수량', '입고수량', '마킹완료수량'],
+                      ...unavailableItems.map((item) => [
+                        item.finishedSkuId, item.skuName, item.reason,
+                        item.orderedQty, item.receivedQty, item.markedQty,
+                      ]),
+                    ];
+                    const ws = XLSX.utils.aoa_to_sheet(wsData);
+                    ws['!cols'] = [{ wch: 22 }, { wch: 40 }, { wch: 18 }, { wch: 10 }, { wch: 10 }, { wch: 12 }];
+                    const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, '작업불가목록');
+                    XLSX.writeFile(wb, `작업불가목록_${new Date().toISOString().slice(0, 10)}.xlsx`);
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs border border-yellow-300 rounded-lg text-yellow-700 hover:bg-yellow-100 transition-colors"
+                >
+                  <Download size={13} />
+                  다운로드
+                </button>
+              </div>
               {showUnavailable && (
-                <div className="p-3 space-y-2 max-h-[60vh] overflow-y-auto">
+                <div className="divide-y divide-gray-50">
                   {unavailableItems.map((item) => (
-                    <div key={item.lineId} className="bg-gray-50 border border-gray-200 rounded-lg px-3 py-2.5">
-                      <div className="flex items-start justify-between gap-2">
-                        <p className="text-xs font-medium text-gray-600 leading-snug">{item.skuName}</p>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 whitespace-nowrap flex-shrink-0">{item.reason}</span>
+                    <div key={item.lineId} className="px-4 py-3 flex items-center justify-between gap-3">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-700 leading-snug">{item.skuName}</p>
+                        <p className="text-xs text-gray-400 font-mono mt-0.5">{item.finishedSkuId}</p>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          주문 {item.orderedQty} / 입고 {item.receivedQty} / 마킹완료 {item.markedQty}
+                        </p>
                       </div>
-                      <p className="text-[10px] text-gray-400 mt-1">
-                        주문 {item.orderedQty} / 입고 {item.receivedQty} / 마킹 {item.markedQty}
-                      </p>
+                      <span className="text-xs px-2 py-1 rounded-full bg-red-100 text-red-700 whitespace-nowrap flex-shrink-0">{item.reason}</span>
                     </div>
                   ))}
                 </div>
               )}
             </div>
           )}
-
-          </div> {/* grid 닫기 */}
 
           {items.length > 0 && (
             <>
