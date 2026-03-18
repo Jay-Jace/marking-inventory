@@ -199,7 +199,10 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               skuName: line.finished_sku?.sku_name || line.finished_sku_id,
               barcode: line.finished_sku?.barcode || null,
               needed: 0,
-              isMarking: false,
+              isMarking:
+                line.finished_sku_id?.includes('MK') ||
+                line.finished_sku?.sku_name?.includes('마킹') ||
+                false,
             };
           }
           componentMap[key].needed += line.ordered_qty;
