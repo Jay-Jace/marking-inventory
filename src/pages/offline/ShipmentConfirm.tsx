@@ -499,30 +499,52 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         .in('finished_sku_id', confirmMarkingSkuIds.length > 0 ? confirmMarkingSkuIds : ['__none__']);
       if (bomErr) throw bomErr;
 
-      // 라인별 실제 발송 수량 계산
-      // needs_marking=true: BOM 유니폼 구성품의 sentQty ÷ bom.quantity = 실제 세트 수
-      // needs_marking=false: sentMap[finished_sku_id] = 실제 발송량
+      // 라인별 실제 발송 수량 계산 — 구성품별 비례배분
+      // 같은 component_sku_id를 사용하는 여러 라인이 있으므로,
+      // sentMap[component]를 각 라인의 effectiveQty 비율로 분배
       const lineSentQtyMap: Record<string, number> = {};
+
+      // needs_marking=false: finished_sku_id가 곧 skuId
       for (const line of lineList) {
-        if (line.needs_marking) {
-          const boms = (confirmBomData || []).filter((b: any) => b.finished_sku_id === line.finished_sku_id);
-          // 유니폼 구성품(MK 미포함)의 sentQty를 기준으로 역산
-          const uniformComp = boms.find((b: any) => !b.component_sku_id?.includes('MK'));
-          if (uniformComp) {
-            const compSentQty = sentMap[uniformComp.component_sku_id] || 0;
-            lineSentQtyMap[line.id] = Math.round(compSentQty / (uniformComp.quantity || 1));
-          } else {
-            // 유니폼 구성품이 없으면 마킹 구성품 기준
-            const anyComp = boms[0];
-            if (anyComp) {
-              const compSentQty = sentMap[anyComp.component_sku_id] || 0;
-              lineSentQtyMap[line.id] = Math.round(compSentQty / (anyComp.quantity || 1));
-            } else {
-              lineSentQtyMap[line.id] = 0;
-            }
-          }
-        } else {
+        if (!line.needs_marking) {
           lineSentQtyMap[line.id] = sentMap[line.finished_sku_id] || 0;
+        }
+      }
+
+      // needs_marking=true: 구성품별 비례배분
+      // 1단계: 각 유니폼 구성품별로 사용하는 라인과 수량 집계
+      const markingLines = lineList.filter((l: any) => l.needs_marking);
+      const compToLines: Record<string, { lineId: string; effectiveQty: number }[]> = {};
+      for (const line of markingLines) {
+        const boms = (confirmBomData || []).filter((b: any) => b.finished_sku_id === line.finished_sku_id);
+        const uniformComp = boms.find((b: any) => !b.component_sku_id?.includes('MK'));
+        const compId = uniformComp?.component_sku_id || boms[0]?.component_sku_id;
+        if (!compId) { lineSentQtyMap[line.id] = 0; continue; }
+        if (!compToLines[compId]) compToLines[compId] = [];
+        const effectiveQty = isAdditional
+          ? Math.max(0, (line.ordered_qty || 0) - (line.sent_qty || 0))
+          : line.ordered_qty;
+        compToLines[compId].push({ lineId: line.id, effectiveQty });
+      }
+
+      // 2단계: 구성품별 발송량을 라인 비율로 분배
+      for (const [compId, entries] of Object.entries(compToLines)) {
+        const totalCompSent = sentMap[compId] || 0;
+        const totalEffective = entries.reduce((s, e) => s + e.effectiveQty, 0);
+        if (totalEffective === 0) {
+          entries.forEach(e => { lineSentQtyMap[e.lineId] = 0; });
+          continue;
+        }
+        let distributed = 0;
+        for (let i = 0; i < entries.length; i++) {
+          if (i === entries.length - 1) {
+            // 마지막 라인: 반올림 오차 보정
+            lineSentQtyMap[entries[i].lineId] = totalCompSent - distributed;
+          } else {
+            const share = Math.round(totalCompSent * entries[i].effectiveQty / totalEffective);
+            lineSentQtyMap[entries[i].lineId] = share;
+            distributed += share;
+          }
         }
       }
 
