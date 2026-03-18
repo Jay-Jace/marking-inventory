@@ -702,7 +702,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           <div className="divide-y divide-gray-50">
             {historyItems.map((h, idx) => (
               <div key={idx} className="px-5 py-3.5 flex items-center gap-3">
-                <p className="text-sm font-medium text-gray-900 truncate flex-1">{h.skuName}</p>
+                <p className="text-sm font-medium text-gray-900 flex-1">{h.skuName}</p>
                 <p className="text-sm font-semibold text-gray-700 flex-shrink-0">{h.qty}개</p>
               </div>
             ))}
@@ -851,7 +851,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
   // ── 이력 전용 화면 (과거 날짜) ──
   if (!isToday) {
     return (
-      <div className="space-y-5 max-w-lg">
+      <div className="space-y-5 max-w-3xl">
         <DateNav />
         <HistoryPanel />
       </div>
@@ -861,7 +861,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
   // ── 발송 대기 없음 + 오늘 ──
   if (noWorkToday && isToday) {
     return (
-      <div className="space-y-5 max-w-lg">
+      <div className="space-y-5 max-w-3xl">
         <DateNav />
 
         {/* 발송 완료 메시지 + 취소/수정 버튼 */}
@@ -952,7 +952,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               <div className="space-y-2">
                 {modifyItems.map((item, idx) => (
                   <div key={item.skuId} className="flex items-center gap-3 bg-gray-50 rounded-lg px-3 py-2">
-                    <p className="text-xs font-medium text-gray-800 flex-1 truncate">{item.skuName}</p>
+                    <p className="text-sm font-medium text-gray-800 flex-1">{item.skuName}</p>
                     <div className="flex items-center gap-1 flex-shrink-0">
                       <span className="text-xs text-gray-400">{item.originalQty} →</span>
                       <input
@@ -1008,7 +1008,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
   const checkedTotalQty = checkedUniformQty + checkedMarkingQty;
 
   return (
-    <div className="space-y-5 max-w-lg">
+    <div className="space-y-5 max-w-3xl">
       {/* 에러 */}
       {error && (
         <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
@@ -1155,8 +1155,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                     className="w-3.5 h-3.5 mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 flex-shrink-0"
                   />
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-gray-800 leading-tight truncate">{item.skuName}</p>
-                    <p className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">{item.skuId}</p>
+                    <p className="text-sm font-medium text-gray-800 leading-snug">{item.skuName}</p>
+                    <p className="text-[11px] text-gray-400 font-mono mt-0.5">{item.skuId}</p>
                   </div>
                 </div>
                 <div className="flex items-center justify-between mt-1.5 gap-1 ml-5">
@@ -1198,8 +1198,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                     className="w-3.5 h-3.5 mt-0.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500 flex-shrink-0"
                   />
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-gray-800 leading-tight truncate">{item.skuName}</p>
-                    <p className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">{item.skuId}</p>
+                    <p className="text-sm font-medium text-gray-800 leading-snug">{item.skuName}</p>
+                    <p className="text-[11px] text-gray-400 font-mono mt-0.5">{item.skuId}</p>
                   </div>
                 </div>
                 <div className="flex items-center justify-between mt-1.5 gap-1 ml-5">
@@ -1357,7 +1357,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
             <div className="space-y-2">
               {modifyItems.map((item, idx) => (
                 <div key={item.skuId} className="flex items-center gap-3 bg-gray-50 rounded-lg px-3 py-2">
-                  <p className="text-xs font-medium text-gray-800 flex-1 truncate">{item.skuName}</p>
+                  <p className="text-sm font-medium text-gray-800 flex-1">{item.skuName}</p>
                   <div className="flex items-center gap-1 flex-shrink-0">
                     <span className="text-xs text-gray-400">{item.originalQty} →</span>
                     <input
