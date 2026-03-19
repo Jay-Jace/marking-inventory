@@ -1,4 +1,4 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
+import type { IncomingMessage, ServerResponse } from 'http';
 
 const ACTION_EMOJI: Record<string, string> = {
   '발송확인': '📦',
@@ -7,23 +7,37 @@ const ACTION_EMOJI: Record<string, string> = {
   '출고확인': '🚚',
 };
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
+function parseBody(req: IncomingMessage): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+    req.on('end', () => { try { resolve(JSON.parse(body)); } catch { reject(new Error('Invalid JSON')); } });
+    req.on('error', reject);
+  });
+}
+
+function send(res: ServerResponse, status: number, data: any) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(data));
+}
+
+export default async function handler(req: IncomingMessage, res: ServerResponse) {
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
+    return send(res, 405, { error: 'Method not allowed' });
   }
 
   const token = process.env.SLACK_BOT_TOKEN;
   const channel = process.env.SLACK_CHANNEL_ID;
 
   if (!token || !channel) {
-    return res.status(500).json({ error: 'Slack configuration missing' });
+    return send(res, 500, { error: 'Slack configuration missing' });
   }
 
   try {
-    const { action, user, date, items, extra } = req.body;
+    const { action, user, date, items, extra } = await parseBody(req);
 
     if (!action || !user || !items) {
-      return res.status(400).json({ error: 'Missing required fields' });
+      return send(res, 400, { error: 'Missing required fields' });
     }
 
     const emoji = ACTION_EMOJI[action] || '📋';
@@ -75,12 +89,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     if (!slackData.ok) {
       console.error('Slack API error:', slackData.error);
-      return res.status(502).json({ error: slackData.error });
+      return send(res, 502, { error: slackData.error });
     }
 
-    return res.status(200).json({ ok: true });
+    return send(res, 200, { ok: true });
   } catch (err: any) {
     console.error('Slack notify error:', err);
-    return res.status(500).json({ error: err.message || 'Internal error' });
+    return send(res, 500, { error: err.message || 'Internal error' });
   }
 }
