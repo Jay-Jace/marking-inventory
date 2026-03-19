@@ -22,6 +22,7 @@ import ShipmentOut from './pages/playwith/ShipmentOut';
 import ActivityHistory from './pages/admin/ActivityHistory';
 import InventoryManage from './pages/admin/InventoryManage';
 import StockLedger from './pages/admin/StockLedger';
+import SalesUpload from './pages/admin/SalesUpload';
 import type { UserRole, AppUser } from './types';
 
 function AppContent() {
@@ -165,6 +166,7 @@ function AppContent() {
         {/* currentUserId를 prop으로 전달 → UserManage 내 getSession() 중복 제거 */}
         <Route path="/admin/users" element={<UserManage currentUserId={user.id} />} />
         <Route path="/admin/history" element={<ActivityHistory />} />
+        <Route path="/admin/sales" element={<SalesUpload />} />
         <Route path="/admin/stock-ledger" element={<StockLedger />} />
 
         {/* 오프라인 매장 */}

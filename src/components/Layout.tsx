@@ -19,6 +19,7 @@ import {
   Truck,
   Package,
   BookOpen,
+  ShoppingCart,
 } from 'lucide-react';
 
 interface NavItem {
@@ -69,6 +70,12 @@ const navItems: NavItem[] = [
     label: '계정 관리',
     path: '/admin/users',
     icon: <Users size={18} />,
+    roles: ['admin'],
+  },
+  {
+    label: '판매 등록',
+    path: '/admin/sales',
+    icon: <ShoppingCart size={18} />,
     roles: ['admin'],
   },
   {

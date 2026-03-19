@@ -171,6 +171,7 @@ async function syncInventoryFromTransactions(rows: RecordTxParams[]): Promise<vo
       case '재고조정': entry.delta += r.quantity; break;
       case '마킹출고': entry.delta -= r.quantity; break;
       case '마킹입고': entry.delta += r.quantity; break;
+      case '판매': entry.delta -= r.quantity; break;
     }
   }
 
@@ -259,6 +260,7 @@ export async function deleteCjTransactions(params: {
       case '재고조정': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
       case '마킹출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
       case '마킹입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
+      case '판매': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
     }
   }
 
@@ -335,6 +337,7 @@ export async function deleteSystemTransactions(params: {
       case '재고조정': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
       case '마킹출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
       case '마킹입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
+      case '판매': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
     }
   }
 
@@ -379,6 +382,86 @@ export async function countCjTransactions(params: {
     .eq('source', 'cj_excel')
     .eq('warehouse_id', params.warehouseId)
     .eq('tx_type', params.txType)
+    .gte('tx_date', params.startDate)
+    .lte('tx_date', params.endDate);
+  return count || 0;
+}
+
+/** POS 판매 데이터 삭제 (기간) + inventory 역반영 */
+export async function deletePosTransactions(params: {
+  warehouseId: string;
+  startDate: string;
+  endDate: string;
+}): Promise<{ deleted: number; error: string | null }> {
+  const { data: txToDelete, error: fetchErr } = await supabaseAdmin
+    .from('inventory_transaction')
+    .select('sku_id, tx_type, quantity')
+    .eq('source', 'pos_excel')
+    .eq('warehouse_id', params.warehouseId)
+    .eq('tx_type', '판매')
+    .gte('tx_date', params.startDate)
+    .lte('tx_date', params.endDate);
+
+  if (fetchErr) return { deleted: 0, error: fetchErr.message };
+  const deleteCount = txToDelete?.length || 0;
+  if (deleteCount === 0) return { deleted: 0, error: null };
+
+  const { error } = await supabaseAdmin
+    .from('inventory_transaction')
+    .delete()
+    .eq('source', 'pos_excel')
+    .eq('warehouse_id', params.warehouseId)
+    .eq('tx_type', '판매')
+    .gte('tx_date', params.startDate)
+    .lte('tx_date', params.endDate);
+
+  if (error) return { deleted: 0, error: error.message };
+
+  // inventory 역반영 (판매 삭제 = 재고 복구)
+  const reverseDelta = new Map<string, number>();
+  for (const tx of txToDelete || []) {
+    reverseDelta.set(tx.sku_id, (reverseDelta.get(tx.sku_id) || 0) + tx.quantity);
+  }
+
+  const skuIds = [...reverseDelta.keys()];
+  for (let i = 0; i < skuIds.length; i += 500) {
+    const batch = skuIds.slice(i, i + 500);
+    const { data: existing } = await supabaseAdmin
+      .from('inventory')
+      .select('sku_id, quantity')
+      .eq('warehouse_id', params.warehouseId)
+      .in('sku_id', batch);
+
+    const existingMap = new Map(
+      (existing || []).map((e) => [e.sku_id, e.quantity as number])
+    );
+
+    const upsertRows = batch.map((skuId) => ({
+      warehouse_id: params.warehouseId,
+      sku_id: skuId,
+      quantity: Math.max(0, (existingMap.get(skuId) || 0) + (reverseDelta.get(skuId) || 0)),
+    }));
+
+    await supabaseAdmin
+      .from('inventory')
+      .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id' });
+  }
+
+  return { deleted: deleteCount, error: null };
+}
+
+/** POS 판매 데이터 건수 조회 */
+export async function countPosTransactions(params: {
+  warehouseId: string;
+  startDate: string;
+  endDate: string;
+}): Promise<number> {
+  const { count } = await supabaseAdmin
+    .from('inventory_transaction')
+    .select('*', { count: 'exact', head: true })
+    .eq('source', 'pos_excel')
+    .eq('warehouse_id', params.warehouseId)
+    .eq('tx_type', '판매')
     .gte('tx_date', params.startDate)
     .lte('tx_date', params.endDate);
   return count || 0;
