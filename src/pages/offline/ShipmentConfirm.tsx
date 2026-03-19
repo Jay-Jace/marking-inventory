@@ -506,10 +506,15 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       // sentMap[component]를 각 라인의 effectiveQty 비율로 분배
       const lineSentQtyMap: Record<string, number> = {};
 
-      // needs_marking=false: finished_sku_id가 곧 skuId
+      // needs_marking=false: finished_sku_id가 곧 skuId → 직접 매핑
+      // 동시에, BOM 구성품과 겹치는 수량을 추적하여 이중 카운트 방지
+      const consumedFromSentMap: Record<string, number> = {};
       for (const line of lineList) {
         if (!line.needs_marking) {
-          lineSentQtyMap[line.id] = sentMap[line.finished_sku_id] || 0;
+          const qty = sentMap[line.finished_sku_id] || 0;
+          lineSentQtyMap[line.id] = qty;
+          // 이 SKU에서 소비한 수량 기록 (BOM 비례배분에서 차감용)
+          consumedFromSentMap[line.finished_sku_id] = (consumedFromSentMap[line.finished_sku_id] || 0) + qty;
         }
       }
 
@@ -530,8 +535,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       }
 
       // 2단계: 구성품별 발송량을 라인 비율로 분배
+      // needs_marking=false에서 이미 소비한 수량을 차감하여 이중 카운트 방지
       for (const [compId, entries] of Object.entries(compToLines)) {
-        const totalCompSent = sentMap[compId] || 0;
+        const rawCompSent = sentMap[compId] || 0;
+        const alreadyConsumed = consumedFromSentMap[compId] || 0;
+        const totalCompSent = Math.max(0, rawCompSent - alreadyConsumed);
         const totalEffective = entries.reduce((s, e) => s + e.effectiveQty, 0);
         if (totalEffective === 0) {
           entries.forEach(e => { lineSentQtyMap[e.lineId] = 0; });
@@ -561,9 +569,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         await Promise.all(batch.map((line: any) => {
           const thisTimeSent = lineSentQtyMap[line.id] ?? 0;
           // 추가 발송: 기존 sent_qty + 이번 발송량, 첫 발송: 이번 발송량
-          const newSentQty = isAdditional
+          // ordered_qty를 초과하지 않도록 cap 처리
+          const rawSentQty = isAdditional
             ? (line.sent_qty || 0) + thisTimeSent
             : thisTimeSent;
+          const newSentQty = Math.min(rawSentQty, line.ordered_qty || rawSentQty);
           return supabase.from('work_order_line').update({ sent_qty: newSentQty }).eq('id', line.id);
         }));
         batchStep++;
