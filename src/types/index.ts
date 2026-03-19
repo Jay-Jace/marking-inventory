@@ -80,8 +80,8 @@ export interface AppUser {
   name: string;
 }
 
-export type TxType = '입고' | '출고' | '반품' | '재고조정' | '마킹출고' | '마킹입고' | '판매';
-export type TxSource = 'cj_excel' | 'system' | 'manual' | 'pos_excel';
+export type TxType = '입고' | '출고' | '반품' | '재고조정' | '마킹출고' | '마킹입고' | '판매' | '기초재고';
+export type TxSource = 'cj_excel' | 'system' | 'manual' | 'pos_excel' | 'initial_stock';
 
 export interface InventoryTransaction {
   id: string;

@@ -143,6 +143,7 @@ export default function StockLedger() {
           case '마킹출고': openingMap[key] -= tx.quantity; break;
           case '마킹입고': openingMap[key] += tx.quantity; break;
           case '판매': openingMap[key] -= tx.quantity; break;
+          case '기초재고': openingMap[key] += tx.quantity; break;
         }
       }
 
@@ -158,6 +159,7 @@ export default function StockLedger() {
           case '마킹출고': txMap[key].markingOut += tx.quantity; break;
           case '마킹입고': txMap[key].markingIn += tx.quantity; break;
           case '판매': txMap[key].sales += tx.quantity; break;
+          case '기초재고': txMap[key].in += tx.quantity; break;
         }
       }
 

@@ -172,6 +172,7 @@ async function syncInventoryFromTransactions(rows: RecordTxParams[]): Promise<vo
       case '마킹출고': entry.delta -= r.quantity; break;
       case '마킹입고': entry.delta += r.quantity; break;
       case '판매': entry.delta -= r.quantity; break;
+      case '기초재고': entry.delta += r.quantity; break;
     }
   }
 
@@ -261,6 +262,7 @@ export async function deleteCjTransactions(params: {
       case '마킹출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
       case '마킹입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
       case '판매': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
+      case '기초재고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
     }
   }
 
@@ -338,6 +340,7 @@ export async function deleteSystemTransactions(params: {
       case '마킹출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
       case '마킹입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
       case '판매': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
+      case '기초재고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
     }
   }
 
