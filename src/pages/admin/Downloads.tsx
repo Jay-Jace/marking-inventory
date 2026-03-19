@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
 import {
   exportAllForms,
@@ -33,14 +33,132 @@ interface StepPreviews {
   step4: { mAdj: PreviewItem[]; cj: PreviewItem[] } | null;
 }
 
-// ── N차 실적 횟수 조회 ──
-async function getActionCount(workOrderId: string, actionType: string): Promise<number> {
-  const { count } = await supabase
-    .from('activity_log')
-    .select('*', { count: 'exact', head: true })
-    .eq('work_order_id', workOrderId)
-    .eq('action_type', actionType);
-  return count || 0;
+interface WaveOption {
+  value: number | 'all';
+  label: string;
+  date: string;
+  totalQty: number;
+}
+
+type StepKey = 'step1' | 'step2' | 'step3' | 'step4';
+
+// ── 헬퍼: 차수별 로그 필터링 ──
+
+function filterLogsByWave(logs: any[], wave: number | 'all'): any[] {
+  if (wave === 'all') return logs;
+  // wave 필드가 있는 경우 (shipment_confirm, receipt_check)
+  const byWaveField = logs.filter((l) => l.summary?.wave === wave);
+  if (byWaveField.length > 0) return byWaveField;
+  // wave 필드 없는 경우 (marking_work, shipment_out) → 인덱스 기반
+  const idx = (wave as number) - 1;
+  return idx >= 0 && idx < logs.length ? [logs[idx]] : [];
+}
+
+// ── 헬퍼: 로그에서 고유 skuId 수집 ──
+
+function collectUniqueSkuIds(logs: any[], qtyField: string): string[] {
+  const ids = new Set<string>();
+  for (const log of logs) {
+    for (const item of log.summary?.items || []) {
+      if ((item[qtyField] || 0) > 0) ids.add(item.skuId);
+    }
+  }
+  return Array.from(ids);
+}
+
+// ── 헬퍼: sku 테이블에서 berriz_id 일괄 조회 ──
+
+async function fetchBerrizIds(
+  skuIds: string[]
+): Promise<Record<string, { berrizId: string; skuName: string }>> {
+  if (skuIds.length === 0) return {};
+  const { data } = await supabase.from('sku').select('sku_id, sku_name, berriz_id').in('sku_id', skuIds);
+  const map: Record<string, { berrizId: string; skuName: string }> = {};
+  for (const row of data || []) {
+    map[row.sku_id] = { berrizId: row.berriz_id || '', skuName: row.sku_name };
+  }
+  return map;
+}
+
+// ── 헬퍼: BOM 조회 ──
+
+async function fetchBomForSkus(finishedSkuIds: string[]): Promise<any[]> {
+  if (finishedSkuIds.length === 0) return [];
+  const { data } = await supabase
+    .from('bom')
+    .select('finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, berriz_id)')
+    .in('finished_sku_id', finishedSkuIds);
+  return data || [];
+}
+
+// ── 헬퍼: 로그 items → PreviewItem[] 합산 ──
+
+function mergeLogItems(
+  logs: any[],
+  qtyField: string,
+  skuMap: Record<string, { berrizId: string; skuName: string }>
+): PreviewItem[] {
+  const map: Record<string, PreviewItem> = {};
+  for (const log of logs) {
+    for (const item of log.summary?.items || []) {
+      const qty = item[qtyField] || 0;
+      if (qty <= 0) continue;
+      const key = item.skuId;
+      if (!map[key]) {
+        const info = skuMap[key] || { berrizId: '', skuName: item.skuName || key };
+        map[key] = { skuId: key, skuName: info.skuName, berrizId: info.berrizId, qty: 0 };
+      }
+      map[key].qty += qty;
+    }
+  }
+  return Object.values(map);
+}
+
+// ── 헬퍼: STEP3 M차감 — BOM 전개 후 합산 ──
+
+function expandBomForMAdj(logs: any[], bomList: any[], qtyField: string): PreviewItem[] {
+  const map: Record<string, PreviewItem> = {};
+  for (const log of logs) {
+    for (const item of log.summary?.items || []) {
+      const qty = item[qtyField] || 0;
+      if (qty <= 0) continue;
+      const boms = bomList.filter((b: any) => b.finished_sku_id === item.skuId);
+      for (const bom of boms) {
+        const key = bom.component_sku_id;
+        if (!map[key]) {
+          map[key] = {
+            skuId: key,
+            skuName: bom.component?.sku_name || key,
+            berrizId: bom.component?.berriz_id || '',
+            qty: 0,
+          };
+        }
+        map[key].qty += bom.quantity * qty;
+      }
+    }
+  }
+  return Object.values(map);
+}
+
+// ── 헬퍼: 차수 목록 생성 ──
+
+function buildWaveOptions(logs: any[], qtyField: string): WaveOption[] {
+  if (logs.length === 0) return [];
+  const options: WaveOption[] = logs.map((log: any, idx: number) => ({
+    value: log.summary?.wave || idx + 1,
+    label: `${log.summary?.wave || idx + 1}차 (${log.action_date})`,
+    date: log.action_date,
+    totalQty: (log.summary?.items || []).reduce((s: number, i: any) => s + (i[qtyField] || 0), 0),
+  }));
+  if (logs.length > 1) {
+    options.unshift({
+      value: 'all',
+      label: `전체 (${logs.length}회 합산)`,
+      date: '',
+      totalQty: options.reduce((s, o) => s + o.totalQty, 0),
+    });
+  }
+  return options;
 }
 
 // ── 컴포넌트 ────────────────────────────────────
@@ -51,14 +169,23 @@ export default function Downloads() {
   const [downloading, setDownloading] = useState(false);
   const [warehouses, setWarehouses] = useState<Record<string, any>>({});
   const [previews, setPreviews] = useState<StepPreviews>({
-    step1: null,
-    step2: null,
-    step3: null,
-    step4: null,
+    step1: null, step2: null, step3: null, step4: null,
   });
   const [previewLoading, setPreviewLoading] = useState(false);
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // ── 차수별 상태 ──
+  const [stepWaves, setStepWaves] = useState<Record<StepKey, WaveOption[]>>({
+    step1: [], step2: [], step3: [], step4: [],
+  });
+  const [selectedWaves, setSelectedWaves] = useState<Record<StepKey, number | 'all'>>({
+    step1: 'all', step2: 'all', step3: 'all', step4: 'all',
+  });
+  const [activityData, setActivityData] = useState<Record<StepKey, any[]>>({
+    step1: [], step2: [], step3: [], step4: [],
+  });
+  const activityLoadedRef = useRef(false);
 
   useEffect(() => {
     loadWorkOrders();
@@ -66,8 +193,18 @@ export default function Downloads() {
   }, []);
 
   useEffect(() => {
-    if (selectedWoId) loadPreviews();
+    if (selectedWoId) {
+      activityLoadedRef.current = false;
+      loadActivityLogs();
+    }
   }, [selectedWoId]);
+
+  // activityData 또는 selectedWaves 변경 시 미리보기 재계산
+  useEffect(() => {
+    if (activityLoadedRef.current) {
+      buildPreviewsForWave();
+    }
+  }, [selectedWaves]);
 
   // ── 작업지시서 목록 + 창고 로드 ──
 
@@ -97,159 +234,124 @@ export default function Downloads() {
     }
   };
 
-  // ── 미리보기 데이터 로드 ──
+  // ── activity_log 로드 (작업지시서 선택 시 1회) ──
 
-  const loadPreviews = async () => {
+  const loadActivityLogs = async () => {
     setPreviewLoading(true);
     setError(null);
     setExpandedStep(null);
     try {
-      // 1. 전체 라인 조회
-      const { data: lines, error: linesErr } = await supabase
-        .from('work_order_line')
-        .select(
-          'id, finished_sku_id, ordered_qty, sent_qty, received_qty, marked_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_id, sku_name, berriz_id)'
-        )
-        .eq('work_order_id', selectedWoId);
-      if (linesErr) throw linesErr;
-      const lineList = (lines || []) as any[];
+      const [shipRes, recRes, markRes, outRes] = await Promise.all([
+        supabase.from('activity_log')
+          .select('id, action_date, summary, created_at')
+          .eq('work_order_id', selectedWoId).eq('action_type', 'shipment_confirm')
+          .order('created_at', { ascending: true }),
+        supabase.from('activity_log')
+          .select('id, action_date, summary, created_at')
+          .eq('work_order_id', selectedWoId).eq('action_type', 'receipt_check')
+          .order('created_at', { ascending: true }),
+        supabase.from('activity_log')
+          .select('id, action_date, summary, created_at')
+          .eq('work_order_id', selectedWoId).eq('action_type', 'marking_work')
+          .order('created_at', { ascending: true }),
+        supabase.from('activity_log')
+          .select('id, action_date, summary, created_at')
+          .eq('work_order_id', selectedWoId).eq('action_type', 'shipment_out')
+          .order('created_at', { ascending: true }),
+      ]);
 
-      // 2. BOM 조회 (마킹 SKU만 필터링 — 1,000행 제한 우회)
-      const markingSkuIds = lineList.filter((l) => l.needs_marking).map((l) => l.finished_sku_id);
-      let bomList: any[] = [];
-      if (markingSkuIds.length > 0) {
-        const { data: bomData, error: bomErr } = await supabase
-          .from('bom')
-          .select(
-            'finished_sku_id, component_sku_id, quantity, component:sku!bom_component_sku_id_fkey(sku_id, sku_name, berriz_id)'
-          )
-          .in('finished_sku_id', markingSkuIds);
-        if (bomErr) throw bomErr;
-        bomList = (bomData || []) as any[];
-      }
+      const shipLogs = shipRes.data || [];
+      const recLogs = recRes.data || [];
+      const markLogs = markRes.data || [];
+      const outLogs = outRes.data || [];
 
-      // 3. daily_marking 조회 (2단계 쿼리 — 임베디드 필터 버그 수정)
-      const lineIds = lineList.map((l) => l.id);
-      let markingList: any[] = [];
-      if (lineIds.length > 0) {
-        const { data: markings, error: markErr } = await supabase
-          .from('daily_marking')
-          .select('work_order_line_id, completed_qty')
-          .in('work_order_line_id', lineIds);
-        if (markErr) throw markErr;
-        markingList = (markings || []) as any[];
-      }
+      const newActivityData = {
+        step1: shipLogs,
+        step2: recLogs,
+        step3: markLogs,
+        step4: outLogs,
+      };
+      setActivityData(newActivityData);
 
-      // daily_marking 라인별 합산
-      const markingTotals: Record<string, number> = {};
-      for (const m of markingList) {
-        markingTotals[m.work_order_line_id] =
-          (markingTotals[m.work_order_line_id] || 0) + m.completed_qty;
-      }
+      const newStepWaves = {
+        step1: buildWaveOptions(shipLogs, 'sentQty'),
+        step2: buildWaveOptions(recLogs, 'actualQty'),
+        step3: buildWaveOptions(markLogs, 'completedQty'),
+        step4: buildWaveOptions(outLogs, 'shipQty'),
+      };
+      setStepWaves(newStepWaves);
 
-      // ── STEP 1: 이관지시서 + 오프라인 M차감 ──
-      // 작업지시서 주문 수량(ordered_qty) 기준 (sent_qty는 발송확인 시 과다 합산 버그 있음)
-      const s1Map: Record<string, PreviewItem> = {};
-      for (const line of lineList) {
-        const qty = line.ordered_qty;
-        if (qty <= 0) continue;
-        if (line.needs_marking) {
-          const boms = bomList.filter((b) => b.finished_sku_id === line.finished_sku_id);
-          for (const bom of boms) {
-            const key = bom.component_sku_id;
-            if (!s1Map[key])
-              s1Map[key] = { skuId: key, skuName: bom.component?.sku_name || key, berrizId: bom.component?.berriz_id || '', qty: 0 };
-            s1Map[key].qty += bom.quantity * qty;
-          }
-        } else {
-          const key = line.finished_sku_id;
-          if (!s1Map[key])
-            s1Map[key] = {
-              skuId: key,
-              skuName: line.finished_sku?.sku_name || key,
-              berrizId: line.finished_sku?.berriz_id || '',
-              qty: 0,
-            };
-          s1Map[key].qty += qty;
-        }
-      }
-      const s1Items = Object.values(s1Map);
+      // 기본 선택: 차수가 1개면 그 차수, 여러 개면 가장 최근 차수
+      const pickDefault = (logs: any[], waves: WaveOption[]): number | 'all' => {
+        if (waves.length === 0) return 'all';
+        if (logs.length === 1) return waves[0].value === 'all' ? (waves[1]?.value ?? 'all') : waves[0].value;
+        // 여러 개면 가장 마지막 차수
+        const last = logs[logs.length - 1];
+        return last.summary?.wave || logs.length;
+      };
 
-      // ── STEP 2: 제작창고 P증가 (마킹 BOM + 단품 포함) ──
-      // Step 1과 동일하게 ordered_qty 기준 (보낸 만큼 받음)
-      const s2Map: Record<string, PreviewItem> = {};
-      for (const line of lineList) {
-        const qty = line.ordered_qty;
-        if (qty <= 0) continue;
-        if (line.needs_marking) {
-          const boms = bomList.filter((b) => b.finished_sku_id === line.finished_sku_id);
-          for (const bom of boms) {
-            const key = bom.component_sku_id;
-            if (!s2Map[key])
-              s2Map[key] = { skuId: key, skuName: bom.component?.sku_name || key, berrizId: bom.component?.berriz_id || '', qty: 0 };
-            s2Map[key].qty += bom.quantity * qty;
-          }
-        } else {
-          const key = line.finished_sku_id;
-          if (!s2Map[key])
-            s2Map[key] = {
-              skuId: key,
-              skuName: line.finished_sku?.sku_name || key,
-              berrizId: line.finished_sku?.berriz_id || '',
-              qty: 0,
-            };
-          s2Map[key].qty += qty;
-        }
-      }
-      const s2Items = Object.values(s2Map);
+      const newSelectedWaves = {
+        step1: pickDefault(shipLogs, newStepWaves.step1),
+        step2: pickDefault(recLogs, newStepWaves.step2),
+        step3: pickDefault(markLogs, newStepWaves.step3),
+        step4: pickDefault(outLogs, newStepWaves.step4),
+      };
+      setSelectedWaves(newSelectedWaves);
 
-      // ── STEP 3: 완성품 제작 (단품 M차감 + 생산입고) ──
-      const s3MMap: Record<string, PreviewItem> = {};
-      const s3PMap: Record<string, PreviewItem> = {};
-      for (const line of lineList) {
-        if (!line.needs_marking) continue;
-        const totalMarked = markingTotals[line.id] || 0;
-        if (totalMarked <= 0) continue;
+      // 직접 buildPreviewsForWave 호출 (state 업데이트 전이라 인자로 전달)
+      activityLoadedRef.current = true;
+      await buildPreviewsForWaveWith(newActivityData, newSelectedWaves);
+    } catch (err: any) {
+      setError(`데이터 조회 실패: ${err.message || '알 수 없는 오류'}`);
+      setPreviewLoading(false);
+    }
+  };
 
-        const boms = bomList.filter((b) => b.finished_sku_id === line.finished_sku_id);
-        for (const bom of boms) {
-          const key = bom.component_sku_id;
-          if (!s3MMap[key])
-            s3MMap[key] = { skuId: key, skuName: bom.component?.sku_name || key, berrizId: bom.component?.berriz_id || '', qty: 0 };
-          s3MMap[key].qty += bom.quantity * totalMarked;
-        }
+  // ── 차수별 미리보기 데이터 구성 ──
 
-        const key = line.finished_sku_id;
-        if (!s3PMap[key])
-          s3PMap[key] = { skuId: key, skuName: line.finished_sku?.sku_name || key, berrizId: line.finished_sku?.berriz_id || '', qty: 0 };
-        s3PMap[key].qty += totalMarked;
-      }
+  const buildPreviewsForWave = async () => {
+    await buildPreviewsForWaveWith(activityData, selectedWaves);
+  };
 
-      // ── STEP 4: 물류센터 출고 (플레이위즈 M차감 + CJ G입고) ──
-      const s4Map: Record<string, PreviewItem> = {};
-      for (const line of lineList) {
-        if (line.needs_marking) {
-          const totalMarked = markingTotals[line.id] || 0;
-          if (totalMarked <= 0) continue;
-          const key = line.finished_sku_id;
-          if (!s4Map[key])
-            s4Map[key] = { skuId: key, skuName: line.finished_sku?.sku_name || key, berrizId: line.finished_sku?.berriz_id || '', qty: 0 };
-          s4Map[key].qty += totalMarked;
-        } else {
-          const qty = line.marked_qty > 0 ? line.marked_qty : 0;
-          if (qty <= 0) continue;
-          const key = line.finished_sku_id;
-          if (!s4Map[key])
-            s4Map[key] = { skuId: key, skuName: line.finished_sku?.sku_name || key, berrizId: line.finished_sku?.berriz_id || '', qty: 0 };
-          s4Map[key].qty += qty;
-        }
-      }
-      const s4Items = Object.values(s4Map);
+  const buildPreviewsForWaveWith = async (
+    data: Record<StepKey, any[]>,
+    waves: Record<StepKey, number | 'all'>
+  ) => {
+    setPreviewLoading(true);
+    setError(null);
+    try {
+      // ── STEP 1: shipment_confirm (BOM 전개 완료 상태) ──
+      const s1Logs = filterLogsByWave(data.step1, waves.step1);
+      const s1SkuIds = collectUniqueSkuIds(s1Logs, 'sentQty');
+      const s1SkuMap = await fetchBerrizIds(s1SkuIds);
+      const s1Items = mergeLogItems(s1Logs, 'sentQty', s1SkuMap);
+
+      // ── STEP 2: receipt_check (BOM 전개 완료 상태) ──
+      const s2Logs = filterLogsByWave(data.step2, waves.step2);
+      const s2SkuIds = collectUniqueSkuIds(s2Logs, 'actualQty');
+      const s2SkuMap = await fetchBerrizIds(s2SkuIds);
+      const s2Items = mergeLogItems(s2Logs, 'actualQty', s2SkuMap);
+
+      // ── STEP 3: marking_work (finished_sku_id 수준) ──
+      const s3Logs = filterLogsByWave(data.step3, waves.step3);
+      const s3FinishedIds = collectUniqueSkuIds(s3Logs, 'completedQty');
+      // ④ M차감: BOM 전개 필요
+      const bomData = await fetchBomForSkus(s3FinishedIds);
+      const s3MItems = expandBomForMAdj(s3Logs, bomData, 'completedQty');
+      // ⑤ P입고: finished_sku_id 직접 사용
+      const s3PSkuMap = await fetchBerrizIds(s3FinishedIds);
+      const s3PItems = mergeLogItems(s3Logs, 'completedQty', s3PSkuMap);
+
+      // ── STEP 4: shipment_out (finished_sku_id 수준) ──
+      const s4Logs = filterLogsByWave(data.step4, waves.step4);
+      const s4SkuIds = collectUniqueSkuIds(s4Logs, 'shipQty');
+      const s4SkuMap = await fetchBerrizIds(s4SkuIds);
+      const s4Items = mergeLogItems(s4Logs, 'shipQty', s4SkuMap);
 
       setPreviews({
         step1: { transfer: s1Items, adj: s1Items },
         step2: { adj: s2Items },
-        step3: { mAdj: Object.values(s3MMap), production: Object.values(s3PMap) },
+        step3: { mAdj: s3MItems, production: s3PItems },
         step4: { mAdj: s4Items, cj: s4Items },
       });
     } catch (err: any) {
@@ -264,14 +366,26 @@ export default function Downloads() {
   const selectedWo = workOrders.find((w) => w.id === selectedWoId);
   const date = selectedWo?.download_date || new Date().toISOString().split('T')[0];
 
-  const handleDownloadStep1 = async () => {
+  const getWaveLabel = (stepKey: StepKey): string => {
+    const wave = selectedWaves[stepKey];
+    return wave === 'all' ? '전체' : `${wave}차`;
+  };
+
+  const getWaveDateOrToday = (stepKey: StepKey): string => {
+    const wave = selectedWaves[stepKey];
+    if (wave === 'all') return new Date().toISOString().split('T')[0];
+    const found = stepWaves[stepKey].find((w) => w.value === wave);
+    return found?.date || new Date().toISOString().split('T')[0];
+  };
+
+  const handleDownloadStep1 = () => {
     if (!previews.step1 || previews.step1.transfer.length === 0) return;
     setDownloading(true);
     try {
       const offlineWh = warehouses['오프라인샵'];
       const playwithWh = warehouses['플레이위즈'];
-      const nCount = await getActionCount(selectedWoId, 'shipment_confirm');
-      const yymmdd = date.slice(2); // YYYY-MM-DD → YY-MM-DD
+      const waveLabel = getWaveLabel('step1');
+      const yymmdd = date.slice(2);
       const transferLines: TransferLine[] = previews.step1.transfer.map((p) => ({
         skuId: p.skuId,
         skuName: p.skuName,
@@ -283,7 +397,7 @@ export default function Downloads() {
         quantity: p.qty,
         code: 'M' as const,
         reason: 'ETC',
-        memo: `${yymmdd} 오프라인 ${nCount}차 출고분`,
+        memo: `${yymmdd} 오프라인 ${waveLabel} 출고분`,
         skuCode: p.skuId,
         skuName: p.skuName,
       }));
@@ -301,23 +415,23 @@ export default function Downloads() {
     }
   };
 
-  const handleDownloadStep2 = async () => {
+  const handleDownloadStep2 = () => {
     if (!previews.step2 || previews.step2.adj.length === 0) return;
     setDownloading(true);
     try {
-      const nCount = await getActionCount(selectedWoId, 'receipt_check');
-      const yymmdd = date.slice(2); // YYYY-MM-DD → YY-MM-DD
+      const waveLabel = getWaveLabel('step2');
+      const yymmdd = date.slice(2);
       const adjLines: InventoryAdjLine[] = previews.step2.adj.map((p) => ({
         skuId: p.berrizId || p.skuId,
         warehouseId: '303310368831744',
         quantity: p.qty,
         code: 'P' as const,
         reason: 'ETC',
-        memo: `${yymmdd} 플레이위즈 ${nCount}차 입고분`,
+        memo: `${yymmdd} 플레이위즈 ${waveLabel} 입고분`,
         skuCode: p.skuId,
         skuName: p.skuName,
       }));
-      exportInventoryAdjustment(adjLines, date, '제작창고P증가');
+      exportInventoryAdjustment(adjLines, date, `제작창고P증가_${waveLabel}`);
     } catch {
       alert('다운로드 중 오류가 발생했습니다.');
     } finally {
@@ -329,7 +443,8 @@ export default function Downloads() {
     if (!previews.step3) return;
     setDownloading(true);
     try {
-      const today = new Date().toISOString().split('T')[0];
+      const waveLabel = getWaveLabel('step3');
+      const waveDate = getWaveDateOrToday('step3');
 
       if (previews.step3.mAdj.length > 0) {
         const mAdjLines: InventoryAdjLine[] = previews.step3.mAdj.map((p) => ({
@@ -338,11 +453,11 @@ export default function Downloads() {
           quantity: p.qty,
           code: 'M' as const,
           reason: 'ETC',
-          memo: '마킹 단품 소모',
+          memo: `마킹 ${waveLabel} 단품 소모`,
           skuCode: p.skuId,
           skuName: p.skuName,
         }));
-        exportInventoryAdjustment(mAdjLines, today, '제작창고M차감_단품소모');
+        exportInventoryAdjustment(mAdjLines, waveDate, `제작창고M차감_단품소모_${waveLabel}`);
       }
 
       if (previews.step3.production.length > 0) {
@@ -352,9 +467,9 @@ export default function Downloads() {
           skuName: p.skuName,
           quantity: p.qty,
           receiptType: 'P' as const,
-          requestDate: today,
+          requestDate: waveDate,
         }));
-        exportProductionReceiptRequest(productionLines, today);
+        exportProductionReceiptRequest(productionLines, waveDate);
       }
     } catch {
       alert('다운로드 중 오류가 발생했습니다.');
@@ -368,7 +483,8 @@ export default function Downloads() {
     setDownloading(true);
     try {
       const cjWh = warehouses['CJ창고'];
-      const today = new Date().toISOString().split('T')[0];
+      const waveLabel = getWaveLabel('step4');
+      const waveDate = getWaveDateOrToday('step4');
 
       if (previews.step4.mAdj.length > 0) {
         const mAdjLines: InventoryAdjLine[] = previews.step4.mAdj.map((p) => ({
@@ -377,11 +493,11 @@ export default function Downloads() {
           quantity: p.qty,
           code: 'M' as const,
           reason: 'ETC',
-          memo: '플레이위즈 출고',
+          memo: `플레이위즈 ${waveLabel} 출고`,
           skuCode: p.skuId,
           skuName: p.skuName,
         }));
-        exportInventoryAdjustment(mAdjLines, today, '플레이위즈M차감_출고');
+        exportInventoryAdjustment(mAdjLines, waveDate, `플레이위즈M차감_출고_${waveLabel}`);
       }
 
       if (previews.step4.cj.length > 0) {
@@ -391,9 +507,9 @@ export default function Downloads() {
           skuName: p.skuName,
           quantity: p.qty,
           receiptType: 'G' as const,
-          requestDate: today,
+          requestDate: waveDate,
         }));
-        exportCjReceiptRequest(cjLines, today);
+        exportCjReceiptRequest(cjLines, waveDate);
       }
     } catch {
       alert('다운로드 중 오류가 발생했습니다.');
@@ -422,6 +538,7 @@ export default function Downloads() {
       num: 1,
       label: 'STEP 1',
       title: '오프라인 발송 확인 후',
+      waveKey: 'step1' as StepKey,
       available: step1Available,
       pendingMsg: '오프라인 발송 확인 후 활성화됩니다',
       items: [
@@ -430,9 +547,7 @@ export default function Downloads() {
       ],
       onDownload: handleDownloadStep1,
       previewData: previews.step1
-        ? [
-            { label: '이관 / M차감', items: previews.step1.transfer },
-          ]
+        ? [{ label: '이관 / M차감', items: previews.step1.transfer }]
         : null,
       hasData: (previews.step1?.transfer.length || 0) > 0,
     },
@@ -440,6 +555,7 @@ export default function Downloads() {
       num: 2,
       label: 'STEP 2',
       title: '플레이위즈 입고 확인 후',
+      waveKey: 'step2' as StepKey,
       available: step2Available,
       pendingMsg: '플레이위즈 입고 확인 후 활성화됩니다',
       items: [{ num: '③', name: '재고조정양식 (제작창고 P증가)' }],
@@ -453,6 +569,7 @@ export default function Downloads() {
       num: 3,
       label: 'STEP 3',
       title: '마킹 완료 — 완성품 제작 반영',
+      waveKey: 'step3' as StepKey,
       available: step3Available,
       pendingMsg: '마킹 작업 시작 후 활성화됩니다',
       items: [
@@ -472,6 +589,7 @@ export default function Downloads() {
       num: 4,
       label: 'STEP 4',
       title: '물류센터 출고 — CJ 입고 요청',
+      waveKey: 'step4' as StepKey,
       available: step4Available,
       pendingMsg: '마킹 완료 후 활성화됩니다',
       items: [
@@ -579,6 +697,8 @@ export default function Downloads() {
                 0
               )
             : 0;
+          const waves = stepWaves[step.waveKey];
+          const currentWave = selectedWaves[step.waveKey];
 
           return (
             <div
@@ -622,6 +742,33 @@ export default function Downloads() {
 
                 {step.available ? (
                   <>
+                    {/* 차수 선택 드롭다운 */}
+                    {waves.length > 0 && (
+                      <div className="mb-3">
+                        <label className="block text-xs font-medium text-gray-500 mb-1">차수 선택</label>
+                        <div className="relative">
+                          <select
+                            value={String(currentWave)}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setSelectedWaves((prev) => ({
+                                ...prev,
+                                [step.waveKey]: v === 'all' ? 'all' : Number(v),
+                              }));
+                            }}
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                          >
+                            {waves.map((w) => (
+                              <option key={String(w.value)} value={String(w.value)}>
+                                {w.label} — {w.totalQty.toLocaleString()}개
+                              </option>
+                            ))}
+                          </select>
+                          <ChevronDown size={14} className="absolute right-3 top-2.5 text-gray-400 pointer-events-none" />
+                        </div>
+                      </div>
+                    )}
+
                     {/* 미리보기 토글 */}
                     {step.previewData && (
                       <button
