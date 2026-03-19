@@ -65,7 +65,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       const { data, error: err } = await supabase
         .from('work_order')
         .select('id, download_date, status')
-        .in('status', ['마킹중', '마킹완료'])
+        .in('status', ['입고확인완료', '마킹중', '마킹완료'])
         .order('uploaded_at', { ascending: false });
       if (err) throw err;
       if (isStale()) return;
