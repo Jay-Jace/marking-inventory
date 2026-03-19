@@ -98,13 +98,13 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       const [pendResult, progressResult, recentResult] = await Promise.all([
         supabase
           .from('work_order')
-          .select('id, download_date, status, work_order_line(ordered_qty, sent_qty)')
+          .select('id, download_date, status, work_order_line(ordered_qty, sent_qty, needs_marking, finished_sku_id)')
           .eq('status', '이관준비')
           .order('uploaded_at', { ascending: false }),
         // 이관중 ~ 마킹완료까지 잔량 체크 (입고/마킹 진행 중에도 추가 발송 가능)
         supabase
           .from('work_order')
-          .select('id, download_date, status, work_order_line(ordered_qty, sent_qty)')
+          .select('id, download_date, status, work_order_line(ordered_qty, sent_qty, needs_marking, finished_sku_id)')
           .in('status', ['이관중', '입고확인완료', '마킹중', '마킹완료'])
           .order('uploaded_at', { ascending: false }),
         supabase
@@ -118,12 +118,39 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       if (recentResult.error) throw recentResult.error;
       if (isStale()) return;
 
-      // 작업지시서에 라인수/잔량 계산 헬퍼
+      // BOM 전개 후 잔량 계산을 위해 모든 작업지시서의 마킹 SKU에 대한 BOM 조회
+      const allWoData = [...((pendResult.data || []) as any[]), ...((progressResult.data || []) as any[])];
+      const allMarkingSkuIds = new Set<string>();
+      for (const wo of allWoData) {
+        for (const l of (wo.work_order_line || [])) {
+          if (l.needs_marking) allMarkingSkuIds.add(l.finished_sku_id);
+        }
+      }
+      const markingSkuArr = [...allMarkingSkuIds];
+      let bomMap: Record<string, number> = {}; // finished_sku_id → BOM 구성품 수 (유니폼+마킹)
+      if (markingSkuArr.length > 0) {
+        const { data: bomData } = await supabase.from('bom')
+          .select('finished_sku_id, quantity')
+          .in('finished_sku_id', markingSkuArr);
+        // finished_sku_id당 구성품 quantity 합계
+        for (const b of (bomData || []) as any[]) {
+          bomMap[b.finished_sku_id] = (bomMap[b.finished_sku_id] || 0) + (b.quantity || 1);
+        }
+      }
+
+      // BOM 전개 후 잔량 계산 헬퍼
       const enrichWo = (wo: any): ActiveWorkOrder => {
         const lines = wo.work_order_line || [];
         const lineCount = lines.length;
-        const remainingQty = lines.reduce((s: number, l: any) =>
-          s + Math.max(0, (l.ordered_qty || 0) - (l.sent_qty || 0)), 0);
+        let remainingQty = 0;
+        for (const l of lines) {
+          const lineRemaining = Math.max(0, (l.ordered_qty || 0) - (l.sent_qty || 0));
+          if (l.needs_marking && bomMap[l.finished_sku_id]) {
+            remainingQty += lineRemaining * bomMap[l.finished_sku_id];
+          } else {
+            remainingQty += lineRemaining;
+          }
+        }
         return { id: wo.id, download_date: wo.download_date, status: wo.status, lineCount, remainingQty };
       };
 
