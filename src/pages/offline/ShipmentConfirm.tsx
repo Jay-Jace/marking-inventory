@@ -2,7 +2,7 @@ import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { recordTransaction, deleteSystemTransactions } from '../../lib/inventoryTransaction';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
-import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, Edit3, FileUp, Trash2, Truck, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, Edit3, FileUp, Trash2, Truck, XCircle } from 'lucide-react';
 import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import { TwoColumnSkeleton } from '../../components/LoadingSkeleton';
@@ -26,6 +26,8 @@ interface ActiveWorkOrder {
   id: string;
   download_date: string;
   status?: string;
+  lineCount?: number;
+  remainingQty?: number;
 }
 
 interface HistoryEntry {
@@ -74,6 +76,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
   const [historyLoading, setHistoryLoading] = useState(false);
   const isToday = selectedDate === today;
 
+  // 아코디언 통합 뷰
+  const [expandedWoIds, setExpandedWoIds] = useState<Set<string>>(new Set());
+  const [woItemsCache, setWoItemsCache] = useState<Record<string, ShipmentItem[]>>({});
+  const [woLoadingId, setWoLoadingId] = useState<string | null>(null);
+
   // 이력 삭제
   const [historyWorkOrder, setHistoryWorkOrder] = useState<{ id: string; date: string; status: string } | null>(null);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -91,7 +98,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       const [pendResult, progressResult, recentResult] = await Promise.all([
         supabase
           .from('work_order')
-          .select('id, download_date, status')
+          .select('id, download_date, status, work_order_line(ordered_qty, sent_qty)')
           .eq('status', '이관준비')
           .order('uploaded_at', { ascending: false }),
         // 이관중 ~ 마킹완료까지 잔량 체크 (입고/마킹 진행 중에도 추가 발송 가능)
@@ -111,32 +118,45 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       if (recentResult.error) throw recentResult.error;
       if (isStale()) return;
 
+      // 작업지시서에 라인수/잔량 계산 헬퍼
+      const enrichWo = (wo: any): ActiveWorkOrder => {
+        const lines = wo.work_order_line || [];
+        const lineCount = lines.length;
+        const remainingQty = lines.reduce((s: number, l: any) =>
+          s + Math.max(0, (l.ordered_qty || 0) - (l.sent_qty || 0)), 0);
+        return { id: wo.id, download_date: wo.download_date, status: wo.status, lineCount, remainingQty };
+      };
+
       // 잔량 있는 건 필터 (ordered_qty > sent_qty인 라인이 있으면 잔량 있음)
       const withRemaining = ((progressResult.data || []) as any[]).filter((wo: any) => {
         const lines = wo.work_order_line || [];
         return lines.some((l: any) => (l.ordered_qty || 0) > (l.sent_qty || 0));
-      }).map((wo: any) => ({ id: wo.id, download_date: wo.download_date, status: wo.status }));
+      }).map(enrichWo);
 
       // 잔량 없는 이관중 건 = 최근 발송 완료 건
       const done = ((progressResult.data || []) as any[]).filter((wo: any) => {
         const lines = wo.work_order_line || [];
         return !lines.some((l: any) => (l.ordered_qty || 0) > (l.sent_qty || 0));
       }).filter((wo: any) => wo.status === '이관중')
-        .map((wo: any) => ({ id: wo.id, download_date: wo.download_date, status: wo.status }));
+        .map(enrichWo);
 
       // 발송 대기 = 이관준비 + 잔량 있는 진행중 건
-      const orders = [
-        ...((pendResult.data || []) as ActiveWorkOrder[]),
-        ...(withRemaining as ActiveWorkOrder[]),
-      ];
+      const pendOrders = ((pendResult.data || []) as any[]).map(enrichWo);
+      const orders = [...pendOrders, ...withRemaining];
       setWorkOrders(orders);
       setRecentShipped([
         ...(done as ActiveWorkOrder[]),
         ...((recentResult.data || []) as ActiveWorkOrder[]),
       ]);
 
-      if (orders.length > 0) {
+      // 1건이면 자동 펼침
+      if (orders.length === 1) {
+        setExpandedWoIds(new Set([orders[0].id]));
         selectOrder(orders[0]);
+      } else if (orders.length > 0) {
+        // 여러 건이면 첫 번째 선택만 (펼침은 사용자가)
+        setSelectedWo(orders[0]);
+        setLoading(false);
       } else {
         setLoading(false);
       }
@@ -144,6 +164,30 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       if (!isStale()) setError(`데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
       setLoading(false);
     }
+  };
+
+  // 아코디언 토글
+  const toggleAccordion = async (wo: ActiveWorkOrder) => {
+    const newSet = new Set(expandedWoIds);
+    if (newSet.has(wo.id)) {
+      newSet.delete(wo.id);
+      setExpandedWoIds(newSet);
+      return;
+    }
+    newSet.add(wo.id);
+    setExpandedWoIds(newSet);
+
+    // 캐시에 있으면 즉시 표시
+    if (woItemsCache[wo.id]) {
+      setSelectedWo(wo);
+      setItems(woItemsCache[wo.id]);
+      return;
+    }
+
+    // 없으면 로드
+    setWoLoadingId(wo.id);
+    await selectOrder(wo);
+    setWoLoadingId(null);
   };
 
   const selectOrder = async (wo: ActiveWorkOrder) => {
@@ -257,6 +301,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       }));
 
       setItems(shipmentItems);
+      // 아코디언 캐시에 저장
+      setWoItemsCache((prev) => ({ ...prev, [wo.id]: shipmentItems }));
     } catch (e: any) {
       if (!isStale()) setError(`발주 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
@@ -1147,50 +1193,104 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       <DateNav />
 
       {/* 헤더 */}
-      <div className="flex items-center justify-between gap-2">
-        <h2 className="text-xl font-bold text-gray-900">발송 확인</h2>
-        {workOrders.length > 1 && (
-          <select
-            className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            value={selectedWo?.id}
-            onChange={(e) => {
-              const wo = workOrders.find((w) => w.id === e.target.value);
-              if (wo) selectOrder(wo);
-            }}
-          >
-            {workOrders.map((wo) => (
-              <option key={wo.id} value={wo.id}>
-                {wo.download_date}{wo.status === '이관중' ? ' (추가 발송)' : ''}
-              </option>
-            ))}
-          </select>
-        )}
-      </div>
+      <h2 className="text-xl font-bold text-gray-900">발송 확인</h2>
 
-      {/* 엑셀 버튼 */}
-      <div className="flex gap-2">
-        <button
-          onClick={handleDownloadTemplate}
-          className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
-        >
-          <Download size={15} />
-          양식 다운로드
-        </button>
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className="flex items-center gap-1.5 px-3 py-2 text-sm border border-blue-300 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors"
-        >
-          <FileUp size={15} />
-          엑셀 업로드
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".xlsx,.xls,.csv"
-          className="hidden"
-          onChange={handleExcelUpload}
-        />
-      </div>
+      {/* 전체 발송 대기 요약 */}
+      {workOrders.length > 0 && (
+        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border border-blue-200 px-5 py-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Truck size={20} className="text-blue-600" />
+              <span className="text-sm font-semibold text-blue-800">전체 발송 대기</span>
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-blue-600">작업지시서 {workOrders.length}건</p>
+              <p className="text-lg font-bold text-blue-900">
+                잔량 {workOrders.reduce((s, wo) => s + (wo.remainingQty || 0), 0).toLocaleString()}개
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 작업지시서별 아코디언 */}
+      {workOrders.map((wo) => {
+        const isExpanded = expandedWoIds.has(wo.id);
+        const isLoadingThis = woLoadingId === wo.id;
+        const cachedItems = woItemsCache[wo.id];
+        const isActive = selectedWo?.id === wo.id;
+
+        return (
+          <div key={wo.id} className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+            {/* 아코디언 헤더 */}
+            <button
+              onClick={() => toggleAccordion(wo)}
+              className={`w-full flex items-center justify-between px-5 py-3.5 transition-colors ${
+                isExpanded ? 'bg-blue-50 border-b border-blue-100' : 'hover:bg-gray-50'
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                {isExpanded ? <ChevronUp size={18} className="text-blue-600" /> : <ChevronDown size={18} className="text-gray-400" />}
+                <div className="text-left">
+                  <p className="text-sm font-semibold text-gray-900">
+                    {wo.download_date}
+                    {wo.status !== '이관준비' && <span className="ml-2 text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">추가 발송</span>}
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5">{wo.lineCount || 0}라인</p>
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="text-sm font-bold text-blue-700">잔량 {(wo.remainingQty || 0).toLocaleString()}개</p>
+              </div>
+            </button>
+
+            {/* 아코디언 본문 */}
+            {isExpanded && (
+              <div className="px-5 py-4 space-y-4">
+                {isLoadingThis ? (
+                  <TwoColumnSkeleton />
+                ) : cachedItems || isActive ? (
+                  <>
+                    {/* 엑셀 버튼 */}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          if (!isActive) { setSelectedWo(wo); setItems(cachedItems || []); }
+                          handleDownloadTemplate();
+                        }}
+                        className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
+                      >
+                        <Download size={15} />
+                        양식 다운로드
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (!isActive) { setSelectedWo(wo); setItems(cachedItems || []); }
+                          fileInputRef.current?.click();
+                        }}
+                        className="flex items-center gap-1.5 px-3 py-2 text-sm border border-blue-300 rounded-lg text-blue-600 hover:bg-blue-50 transition-colors"
+                      >
+                        <FileUp size={15} />
+                        엑셀 업로드
+                      </button>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".xlsx,.xls,.csv"
+                        className="hidden"
+                        onChange={handleExcelUpload}
+                      />
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* 선택된 작업지시서의 상세 — 아코디언이 펼쳐진 경우에만 */}
+      {selectedWo && expandedWoIds.has(selectedWo.id) && (<>
 
       {xlsxError && (
         <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
@@ -1452,6 +1552,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           </div>
         </div>
       )}
+
+      </>)}
 
       {/* ── 취소 확인 모달 ── */}
       {showCancelConfirm && (
