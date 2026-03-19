@@ -98,13 +98,13 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       const [pendResult, progressResult, recentResult] = await Promise.all([
         supabase
           .from('work_order')
-          .select('id, download_date, status, work_order_line(ordered_qty, sent_qty, needs_marking, finished_sku_id)')
+          .select('id, download_date, status, sent_detail, work_order_line(ordered_qty, sent_qty, needs_marking, finished_sku_id)')
           .eq('status', '이관준비')
           .order('uploaded_at', { ascending: false }),
         // 이관중 ~ 마킹완료까지 잔량 체크 (입고/마킹 진행 중에도 추가 발송 가능)
         supabase
           .from('work_order')
-          .select('id, download_date, status, work_order_line(ordered_qty, sent_qty, needs_marking, finished_sku_id)')
+          .select('id, download_date, status, sent_detail, work_order_line(ordered_qty, sent_qty, needs_marking, finished_sku_id)')
           .in('status', ['이관중', '입고확인완료', '마킹중', '마킹완료'])
           .order('uploaded_at', { ascending: false }),
         supabase
@@ -138,34 +138,35 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         }
       }
 
-      // BOM 전개 후 잔량 계산 헬퍼
+      // BOM 전개 후 잔량 계산 헬퍼 (sent_detail 기반)
       const enrichWo = (wo: any): ActiveWorkOrder => {
         const lines = wo.work_order_line || [];
         const lineCount = lines.length;
-        let remainingQty = 0;
+        const detail: Record<string, number> = wo.sent_detail || {};
+
+        // 1. BOM 전개 후 총 주문량 계산
+        let totalOrdered = 0;
         for (const l of lines) {
-          const lineRemaining = Math.max(0, (l.ordered_qty || 0) - (l.sent_qty || 0));
           if (l.needs_marking && bomMap[l.finished_sku_id]) {
-            remainingQty += lineRemaining * bomMap[l.finished_sku_id];
+            totalOrdered += (l.ordered_qty || 0) * bomMap[l.finished_sku_id];
           } else {
-            remainingQty += lineRemaining;
+            totalOrdered += (l.ordered_qty || 0);
           }
         }
+
+        // 2. sent_detail 합계 = 이미 발송된 구성품 수량
+        const totalSent = Object.values(detail).reduce((s: number, v: any) => s + (v || 0), 0);
+
+        const remainingQty = Math.max(0, totalOrdered - totalSent);
         return { id: wo.id, download_date: wo.download_date, status: wo.status, lineCount, remainingQty };
       };
 
-      // 잔량 있는 건 필터 (ordered_qty > sent_qty인 라인이 있으면 잔량 있음)
-      const withRemaining = ((progressResult.data || []) as any[]).filter((wo: any) => {
-        const lines = wo.work_order_line || [];
-        return lines.some((l: any) => (l.ordered_qty || 0) > (l.sent_qty || 0));
-      }).map(enrichWo);
+      // 잔량 있는 건 필터 (enrichWo에서 계산된 remainingQty > 0)
+      const allProgress = ((progressResult.data || []) as any[]).map(enrichWo);
+      const withRemaining = allProgress.filter((wo) => (wo.remainingQty || 0) > 0);
 
       // 잔량 없는 이관중 건 = 최근 발송 완료 건
-      const done = ((progressResult.data || []) as any[]).filter((wo: any) => {
-        const lines = wo.work_order_line || [];
-        return !lines.some((l: any) => (l.ordered_qty || 0) > (l.sent_qty || 0));
-      }).filter((wo: any) => wo.status === '이관중')
-        .map(enrichWo);
+      const done = allProgress.filter((wo) => (wo.remainingQty || 0) <= 0 && wo.status === '이관중');
 
       // 발송 대기 = 이관준비 + 잔량 있는 진행중 건
       const pendOrders = ((pendResult.data || []) as any[]).map(enrichWo);
@@ -269,13 +270,13 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
 
       const isAdditionalShipment = wo.status === '이관중';
 
-      for (const line of (lines || []) as any[]) {
-        // 추가 발송 시 잔량만, 첫 발송 시 전체 수량
-        const effectiveQty = isAdditionalShipment
-          ? Math.max(0, (line.ordered_qty || 0) - (line.sent_qty || 0))
-          : line.ordered_qty;
-        if (effectiveQty <= 0) continue; // 잔량 없는 라인은 제외
+      // sent_detail 조회 (구성품 레벨 발송 이력)
+      const { data: woSentData } = await supabase
+        .from('work_order').select('sent_detail').eq('id', wo.id).single();
+      const sentDetail: Record<string, number> = (woSentData as any)?.sent_detail || {};
 
+      // 1차: 전체 주문 수량으로 componentMap 빌드
+      for (const line of (lines || []) as any[]) {
         if (line.needs_marking) {
           const boms = (bomData || []).filter((b: any) => b.finished_sku_id === line.finished_sku_id);
           for (const bom of boms as any[]) {
@@ -293,7 +294,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                   false,
               };
             }
-            componentMap[key].needed += bom.quantity * effectiveQty;
+            componentMap[key].needed += bom.quantity * (line.ordered_qty || 0);
           }
         } else {
           const key = line.finished_sku_id;
@@ -310,7 +311,18 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                 false,
             };
           }
-          componentMap[key].needed += effectiveQty;
+          componentMap[key].needed += (line.ordered_qty || 0);
+        }
+      }
+
+      // 2차: sent_detail에서 이미 발송된 수량 차감 (추가 발송 시)
+      if (isAdditionalShipment) {
+        for (const key of Object.keys(componentMap)) {
+          componentMap[key].needed = Math.max(0, componentMap[key].needed - (sentDetail[key] || 0));
+        }
+        // 잔량 0인 구성품 제거
+        for (const key of Object.keys(componentMap)) {
+          if (componentMap[key].needed <= 0) delete componentMap[key];
         }
       }
 
@@ -548,13 +560,29 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       const isAdditional = selectedWo.status === '이관중';
 
       setConfirmProgress({ current: 1, total: 4, step: '발송 상태 업데이트 중...' });
-      // 이관준비 → 이관중 전이 (이미 이관중이면 상태 유지)
+
+      // sent_detail JSONB에 구성품별 발송 수량 머지 (정확한 추적)
+      const { data: woData } = await supabase
+        .from('work_order').select('sent_detail').eq('id', selectedWo.id).single();
+      const prevDetail: Record<string, number> = (woData as any)?.sent_detail || {};
+      const newDetail: Record<string, number> = { ...prevDetail };
+      for (const [skuId, qty] of Object.entries(sentMap)) {
+        newDetail[skuId] = (newDetail[skuId] || 0) + qty;
+      }
+
+      // 이관준비 → 이관중 전이 + sent_detail 저장
       if (!isAdditional) {
         const { error: statusErr } = await supabase
           .from('work_order')
-          .update({ status: '이관중' })
+          .update({ status: '이관중', sent_detail: newDetail })
           .eq('id', selectedWo.id);
         if (statusErr) throw statusErr;
+      } else {
+        const { error: detailErr } = await supabase
+          .from('work_order')
+          .update({ sent_detail: newDetail })
+          .eq('id', selectedWo.id);
+        if (detailErr) throw detailErr;
       }
 
       setConfirmProgress({ current: 2, total: 4, step: '데이터 조회 중...' });
@@ -580,11 +608,14 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       const lineSentQtyMap: Record<string, number> = {};
 
       // needs_marking=false: finished_sku_id가 곧 skuId → 직접 매핑
-      // 동시에, BOM 구성품과 겹치는 수량을 추적하여 이중 카운트 방지
+      // ordered_qty(또는 잔량)까지만 할당하여 BOM 구성품과 겹치는 수량 방지
       const consumedFromSentMap: Record<string, number> = {};
       for (const line of lineList) {
         if (!line.needs_marking) {
-          const qty = sentMap[line.finished_sku_id] || 0;
+          const maxQty = isAdditional
+            ? Math.max(0, (line.ordered_qty || 0) - (line.sent_qty || 0))
+            : line.ordered_qty || 0;
+          const qty = Math.min(sentMap[line.finished_sku_id] || 0, maxQty);
           lineSentQtyMap[line.id] = qty;
           // 이 SKU에서 소비한 수량 기록 (BOM 비례배분에서 차감용)
           consumedFromSentMap[line.finished_sku_id] = (consumedFromSentMap[line.finished_sku_id] || 0) + qty;
