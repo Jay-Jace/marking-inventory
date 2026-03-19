@@ -374,6 +374,20 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     );
   };
 
+  // 작업 가능 목록만 다운로드
+  const handleDownloadAvailable = () => {
+    const available = items.filter((item) => item.todayQty > 0 || item.remainingQty > 0);
+    generateTemplate(
+      available.map((item) => ({
+        skuId: item.finishedSkuId,
+        skuName: item.skuName,
+        barcode: item.barcode,
+        qty: item.remainingQty,
+      })),
+      `작업가능목록_${selectedOrder?.download_date || '양식'}.xlsx`
+    );
+  };
+
   // ── 엑셀 업로드 ──
 
   const handleExcelUpload = async (e: ChangeEvent<HTMLInputElement>) => {
@@ -1098,6 +1112,14 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             >
               <Download size={15} />
               양식 다운로드
+            </button>
+            <button
+              onClick={handleDownloadAvailable}
+              disabled={items.length === 0}
+              className="flex items-center gap-1.5 px-3 py-2 text-sm border border-green-300 rounded-lg text-green-600 hover:bg-green-50 transition-colors disabled:opacity-50"
+            >
+              <Download size={15} />
+              작업 가능 양식 다운로드
             </button>
             <button
               onClick={() => fileInputRef.current?.click()}
