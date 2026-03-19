@@ -36,7 +36,26 @@ interface MarkingItem {
   todayQty: number;       // 오늘 완료할 수량 (입력값)
   markedQty: number;      // 누적 완료 수량
   orderedQty: number;     // 주문 수량
+  sentQty: number;        // 발송(출고) 수량
   isCarryOver: boolean;   // 이월 작업건 여부
+}
+
+interface OverprocessedItem {
+  finishedSkuId: string;
+  skuName: string;
+  orderedQty: number;
+  markedQty: number;
+  sentQty: number;
+  overQty: number;        // 과처리 수량 = marked - ordered
+  resolvedQty: number;    // 출고로 해소된 수량
+  unresolvedQty: number;  // 미해소 수량
+}
+
+interface OverprocessWarning {
+  skuName: string;
+  orderedQty: number;
+  newMarkedQty: number;   // 저장 후 예상 마킹 완료 수량
+  overQty: number;        // 과처리 수량
 }
 
 interface UnavailableItem {
@@ -75,6 +94,7 @@ interface MergedMarkingItem {
   todayQty: number;
   markedQty: number;
   orderedQty: number;
+  sentQty: number;
   isCarryOver: boolean;
   sources: MarkingSource[];
 }
@@ -121,6 +141,13 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   })();
   const isToday = selectedDate === today;
   const isTomorrow = selectedDate === tomorrowDate;
+
+  // 과처리 관련
+  const [overprocessedItems, setOverprocessedItems] = useState<OverprocessedItem[]>([]);
+  const [showOverprocessed, setShowOverprocessed] = useState(false);
+  const [showOverprocessWarning, setShowOverprocessWarning] = useState(false);
+  const [overprocessWarnings, setOverprocessWarnings] = useState<OverprocessWarning[]>([]);
+  const [pendingSaveType, setPendingSaveType] = useState<'single' | 'merged' | null>(null);
 
   // 이력 삭제
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -185,7 +212,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       // 마킹 필요 라인만 조회 (단품 제외)
       const { data: lines, error: linesErr } = await supabase
         .from('work_order_line')
-        .select('id, finished_sku_id, ordered_qty, received_qty, marked_qty, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
+        .select('id, finished_sku_id, ordered_qty, received_qty, marked_qty, sent_qty, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
         .eq('work_order_id', wo.id)
         .eq('needs_marking', true);
       if (linesErr) throw linesErr;
@@ -266,9 +293,30 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
       const markingItems: MarkingItem[] = [];
       const unavailable: UnavailableItem[] = [];
+      const overprocessed: OverprocessedItem[] = [];
 
       for (const line of (lines || []) as any[]) {
         const skuName = line.finished_sku?.sku_name || line.finished_sku_id;
+        const sentQty = line.sent_qty || 0;
+
+        // 과처리 판별 (완료 여부와 무관하게 체크)
+        if (line.marked_qty > line.ordered_qty) {
+          const overQty = line.marked_qty - line.ordered_qty;
+          const resolvedQty = Math.min(sentQty, overQty);
+          const unresolvedQty = overQty - resolvedQty;
+          if (unresolvedQty > 0) {
+            overprocessed.push({
+              finishedSkuId: line.finished_sku_id,
+              skuName,
+              orderedQty: line.ordered_qty,
+              markedQty: line.marked_qty,
+              sentQty,
+              overQty,
+              resolvedQty,
+              unresolvedQty,
+            });
+          }
+        }
 
         // 미입고: received_qty = 0
         if (line.received_qty === 0) {
@@ -316,6 +364,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             todayQty: todayMap[line.id] || 0,
             markedQty: line.marked_qty,
             orderedQty: line.ordered_qty,
+            sentQty,
             isCarryOver: hasHistory.has(line.id) || (line.marked_qty > 0 && line.marked_qty < line.received_qty),
           });
         }
@@ -329,6 +378,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
       setItems(markingItems);
       setUnavailableItems(unavailable);
+      setOverprocessedItems(overprocessed);
       // 아코디언 캐시에 저장
       setWoItemsCache((prev) => ({ ...prev, [wo.id]: { items: markingItems, unavailable } }));
     } catch (e: any) {
@@ -393,6 +443,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
                 todayQty: 0,
                 markedQty: 0,
                 orderedQty: 0,
+                sentQty: 0,
                 isCarryOver: false,
                 sources: [],
               };
@@ -400,6 +451,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             mergedMap[item.finishedSkuId].remainingQty += item.remainingQty;
             mergedMap[item.finishedSkuId].markedQty += item.markedQty;
             mergedMap[item.finishedSkuId].orderedQty += item.orderedQty;
+            mergedMap[item.finishedSkuId].sentQty += item.sentQty;
             if (item.isCarryOver) mergedMap[item.finishedSkuId].isCarryOver = true;
             mergedMap[item.finishedSkuId].sources.push({
               woId: wo.id,
@@ -831,6 +883,60 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   const allComplete = items.every((item) => item.todayQty >= item.remainingQty);
 
   // ── 저장 ──
+
+  // ── 과처리 검사 (저장 전) ──
+  const checkOverprocess = () => {
+    const activeItems = items.filter((item) => item.todayQty > 0);
+    const warnings: OverprocessWarning[] = [];
+    for (const item of activeItems) {
+      const newMarkedQty = item.markedQty + item.todayQty;
+      if (newMarkedQty > item.orderedQty) {
+        warnings.push({
+          skuName: item.skuName,
+          orderedQty: item.orderedQty,
+          newMarkedQty,
+          overQty: newMarkedQty - item.orderedQty,
+        });
+      }
+    }
+    if (warnings.length > 0) {
+      setOverprocessWarnings(warnings);
+      setPendingSaveType('single');
+      setShowOverprocessWarning(true);
+    } else {
+      handleSave();
+    }
+  };
+
+  const checkMergedOverprocess = () => {
+    const activeItems = mergedItems.filter((item) => item.todayQty > 0);
+    const warnings: OverprocessWarning[] = [];
+    for (const item of activeItems) {
+      const newMarkedQty = item.markedQty + item.todayQty;
+      if (newMarkedQty > item.orderedQty) {
+        warnings.push({
+          skuName: item.skuName,
+          orderedQty: item.orderedQty,
+          newMarkedQty,
+          overQty: newMarkedQty - item.orderedQty,
+        });
+      }
+    }
+    if (warnings.length > 0) {
+      setOverprocessWarnings(warnings);
+      setPendingSaveType('merged');
+      setShowOverprocessWarning(true);
+    } else {
+      handleMergedSave();
+    }
+  };
+
+  const confirmOverprocessSave = () => {
+    setShowOverprocessWarning(false);
+    if (pendingSaveType === 'single') handleSave();
+    else if (pendingSaveType === 'merged') handleMergedSave();
+    setPendingSaveType(null);
+  };
 
   const handleSave = async () => {
     if (!selectedOrder) return;
@@ -1449,6 +1555,48 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         </div>
       )}
 
+      {/* 과처리 경고 모달 */}
+      {showOverprocessWarning && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl max-w-sm w-full overflow-hidden">
+            <div className="px-6 py-5 border-b border-gray-100 bg-orange-50">
+              <div className="flex items-center gap-2">
+                <AlertTriangle size={20} className="text-orange-600" />
+                <h3 className="text-lg font-bold text-orange-800">과처리 경고</h3>
+              </div>
+              <p className="text-sm text-orange-600 mt-1">주문 수량보다 많이 마킹됩니다</p>
+            </div>
+            <div className="px-6 py-4 max-h-60 overflow-y-auto space-y-2">
+              {overprocessWarnings.map((w, i) => (
+                <div key={i} className="bg-red-50 rounded-lg p-3">
+                  <p className="text-sm font-medium text-gray-900 truncate">{w.skuName}</p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    주문 <span className="font-medium">{w.orderedQty}개</span> → 마킹 완료 <span className="font-bold text-red-600">{w.newMarkedQty}개</span>
+                  </p>
+                  <p className="text-xs font-medium text-red-600 mt-0.5">
+                    과처리 {w.overQty}개
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="px-6 py-4 border-t border-gray-100 flex gap-3">
+              <button
+                onClick={() => { setShowOverprocessWarning(false); setPendingSaveType(null); }}
+                className="flex-1 py-2.5 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 hover:bg-gray-50 transition-colors"
+              >
+                취소
+              </button>
+              <button
+                onClick={confirmOverprocessSave}
+                className="flex-1 py-2.5 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600 transition-colors"
+              >
+                그래도 저장
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── 전체 통합 뷰 아코디언 (오늘이고 orders > 1) ── */}
       {isToday && orders.length > 1 && (
         <div className="bg-white rounded-xl shadow-sm border border-indigo-200 overflow-hidden">
@@ -1625,7 +1773,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
                   )}
 
                   {/* 저장 버튼 */}
-                  <button onClick={handleMergedSave} disabled={mergedSaving || mergedTotalToday === 0}
+                  <button onClick={checkMergedOverprocess} disabled={mergedSaving || mergedTotalToday === 0}
                     className="w-full py-3.5 rounded-xl text-white font-semibold text-base bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors">
                     {mergedSaving ? '저장 중...' : `전체 작업 완료 저장 (${mergedTotalToday}개)`}
                   </button>
@@ -1833,6 +1981,55 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             </div>
           )}
 
+          {/* 과처리 현황 */}
+          {overprocessedItems.length > 0 && (
+            <div className="bg-white rounded-xl shadow-sm border border-red-200 overflow-hidden">
+              <div className="px-4 py-3 bg-red-50 border-b border-red-200 flex items-center justify-between">
+                <button
+                  onClick={() => setShowOverprocessed(!showOverprocessed)}
+                  className="flex items-center gap-2 text-sm font-medium text-red-800"
+                >
+                  <AlertTriangle size={14} className="text-red-600" />
+                  <span>과처리 현황 ({overprocessedItems.length}종)</span>
+                  {showOverprocessed ? <ChevronUp size={14} className="text-red-500" /> : <ChevronDown size={14} className="text-red-500" />}
+                </button>
+                <span className="text-xs font-medium text-red-600">
+                  미해소 {overprocessedItems.reduce((s, i) => s + i.unresolvedQty, 0)}개
+                </span>
+              </div>
+              {showOverprocessed && (
+                <div className="divide-y divide-gray-50">
+                  {overprocessedItems.map((item) => (
+                    <div key={item.finishedSkuId} className="px-4 py-3 flex items-center justify-between gap-3">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-700 leading-snug">{item.skuName}</p>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          주문 {item.orderedQty}개 / 마킹완료 {item.markedQty}개
+                        </p>
+                        <div className="flex gap-2 mt-1">
+                          <span className="text-[10px] px-1.5 py-0.5 bg-green-100 text-green-700 rounded-full">
+                            정상 {item.orderedQty}개
+                          </span>
+                          <span className="text-[10px] px-1.5 py-0.5 bg-red-100 text-red-700 rounded-full">
+                            과처리 {item.overQty}개
+                          </span>
+                          {item.resolvedQty > 0 && (
+                            <span className="text-[10px] px-1.5 py-0.5 bg-gray-100 text-gray-600 rounded-full">
+                              출고해소 {item.resolvedQty}개
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <span className="text-sm font-bold text-red-600 whitespace-nowrap">
+                        미해소 {item.unresolvedQty}개
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           {/* 작업 목록 카드 */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
             {items.length === 0 ? (
@@ -1907,7 +2104,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
                 </div>
               )}
               <button
-                onClick={handleSave}
+                onClick={checkOverprocess}
                 disabled={saving || totalToday === 0}
                 className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-60 transition-colors text-base"
               >
