@@ -86,27 +86,50 @@ function AppContent() {
      *   TOKEN_REFRESHED - JWT 자동 갱신 (navigate 없음, user 유지)
      *   SIGNED_OUT      - 로그아웃 (로그인 페이지로 navigate)
      *
-     * 안전망: GoTrue·loadUserProfile 등이 어떤 이유로든 hang하면
-     * 8초 후 강제로 로딩 해제. (clearTimeout은 cleanup에서만 수행)
-     * 정상 완료 시 setLoading(false)가 먼저 실행되므로 타이머 발화는 no-op.
+     * 이중 안전망:
+     * 1) getSession()을 3초 타임아웃으로 직접 호출 — 빠르게 초기 상태 결정
+     * 2) onAuthStateChange로 후속 이벤트(로그인/로그아웃) 처리
      */
-    const fallbackTimer = setTimeout(() => {
-      console.warn('[Auth] 전체 초기화 타임아웃 (8s) — 강제 로딩 해제');
-      setLoading(false);
-    }, 8_000);
+    let resolved = false;
 
+    // 1) 직접 getSession — 3초 내 응답 없으면 세션 없음으로 처리
+    const initSession = async () => {
+      try {
+        const result = await Promise.race([
+          supabase.auth.getSession(),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 3_000)),
+        ]);
+        if (resolved) return; // onAuthStateChange가 먼저 처리한 경우
+        resolved = true;
+        if (result && 'data' in result && result.data.session) {
+          const s = result.data.session;
+          await loadUserProfile(s.user.id, s.user.email || '', false);
+        } else {
+          setLoading(false);
+        }
+      } catch {
+        if (!resolved) {
+          resolved = true;
+          setLoading(false);
+        }
+      }
+    };
+    initSession();
+
+    // 2) 후속 이벤트 처리 (로그인, 로그아웃, 토큰 갱신)
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (event === 'INITIAL_SESSION') {
-        // 기존 세션 복원: 현재 페이지 유지 (navigate 없음)
+        // initSession이 이미 처리했을 가능성 높음
+        if (resolved) return;
+        resolved = true;
         if (session) {
           await loadUserProfile(session.user.id, session.user.email || '', false);
         } else {
           setLoading(false);
         }
       } else if (event === 'SIGNED_IN') {
-        // 실제 signInWithPassword 성공 → 역할 기본 페이지로 이동
         if (session) {
           await loadUserProfile(session.user.id, session.user.email || '', true);
         }
@@ -115,11 +138,9 @@ function AppContent() {
         setLoading(false);
         navigate('/login');
       }
-      // TOKEN_REFRESHED, USER_UPDATED: user 상태 그대로 유지, navigate 없음
     });
 
     return () => {
-      clearTimeout(fallbackTimer);
       subscription.unsubscribe();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
