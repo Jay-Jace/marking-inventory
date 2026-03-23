@@ -19,6 +19,7 @@ interface ShipmentItem {
   inventoryQty: number;
   isShortage: boolean;
   isMarking: boolean;
+  needsMarking: boolean; // true=마킹 작업 예정 (BOM 전개), false=단순 출고
   checked: boolean;
 }
 
@@ -52,6 +53,7 @@ interface MergedShipmentItem {
   inventoryQty: number;
   isShortage: boolean;
   isMarking: boolean;
+  needsMarking: boolean;
   checked: boolean;
   sources: ShipmentSource[];
 }
@@ -295,7 +297,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
 
       const componentMap: Record<
         string,
-        { lineId: string; skuId: string; skuName: string; barcode: string | null; needed: number; isMarking: boolean }
+        { lineId: string; skuId: string; skuName: string; barcode: string | null; needed: number; isMarking: boolean; needsMarking: boolean }
       > = {};
 
       const isAdditionalShipment = wo.status !== '이관준비';
@@ -322,6 +324,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                   bom.component_sku_id?.includes('MK') ||
                   bom.component?.sku_name?.includes('마킹') ||
                   false,
+                needsMarking: true,
               };
             }
             componentMap[key].needed += bom.quantity * (line.ordered_qty || 0);
@@ -339,6 +342,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                 line.finished_sku_id?.includes('MK') ||
                 line.finished_sku?.sku_name?.includes('마킹') ||
                 false,
+              needsMarking: false,
             };
           }
           componentMap[key].needed += (line.ordered_qty || 0);
@@ -366,6 +370,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         inventoryQty: inventoryMap[c.skuId] || 0,
         isShortage: (inventoryMap[c.skuId] || 0) < c.needed,
         isMarking: c.isMarking,
+        needsMarking: c.needsMarking,
         checked: true,
       }));
 
@@ -394,6 +399,99 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
 
   const checkedItems = items.filter((i) => i.checked);
   const allChecked = items.length > 0 && items.every((i) => i.checked);
+
+  // ── 아이템 카드 렌더 헬퍼 ──
+  const colorMap: Record<string, { checkbox: string; ring: string; border: string }> = {
+    blue:   { checkbox: 'text-blue-600 focus:ring-blue-500', ring: 'focus:ring-blue-500', border: 'border-gray-300' },
+    purple: { checkbox: 'text-purple-600 focus:ring-purple-500', ring: 'focus:ring-purple-500', border: 'border-gray-300' },
+    teal:   { checkbox: 'text-teal-600 focus:ring-teal-500', ring: 'focus:ring-teal-500', border: 'border-gray-300' },
+    orange: { checkbox: 'text-orange-600 focus:ring-orange-500', ring: 'focus:ring-orange-500', border: 'border-gray-300' },
+  };
+
+  const renderItemCard = (item: ShipmentItem, color: string) => {
+    const c = colorMap[color] || colorMap.blue;
+    return (
+      <div key={item.skuId} className={`px-3 py-3 ${item.isShortage ? 'bg-red-50' : ''} ${!item.checked ? 'opacity-40' : ''}`}>
+        <div className="flex items-start gap-1.5">
+          <input
+            type="checkbox"
+            checked={item.checked}
+            onChange={() => toggleCheck(item.skuId)}
+            className={`w-3.5 h-3.5 mt-0.5 rounded border-gray-300 ${c.checkbox} flex-shrink-0`}
+          />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-gray-800 leading-snug">{item.skuName}</p>
+            <p className="text-[11px] text-gray-400 font-mono mt-0.5">{item.skuId}</p>
+          </div>
+        </div>
+        <div className="flex items-center justify-between mt-1.5 gap-1 ml-5">
+          <div>
+            <p className="text-[10px] text-gray-400">주문 {item.orderedQty}</p>
+            <p className={`text-[10px] ${item.isShortage ? 'text-red-500' : 'text-gray-400'}`}>재고 {item.inventoryQty}</p>
+          </div>
+          <div className="flex items-center gap-0.5">
+            <input
+              type="number"
+              min="0"
+              value={item.sentQty}
+              onChange={(e) => handleSentChange(item.skuId, Number(e.target.value))}
+              disabled={!item.checked}
+              className={`w-16 border rounded-lg px-1.5 py-1 text-xs text-right focus:outline-none focus:ring-2 ${c.ring} disabled:bg-gray-100 ${
+                item.sentQty > item.inventoryQty ? 'border-orange-300 bg-orange-50' : c.border
+              }`}
+            />
+            <span className="text-[10px] text-gray-400">개</span>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ── 통합 뷰 아이템 카드 렌더 헬퍼 ──
+  const renderMergedItemCard = (item: MergedShipmentItem, color: string) => {
+    const ringColor = color === 'blue' ? 'blue' : color === 'purple' ? 'purple' : color === 'teal' ? 'teal' : 'orange';
+    return (
+      <div key={item.skuId} className={`px-3 py-2.5 ${item.isShortage ? 'bg-red-50' : ''}`}>
+        <div className="flex items-start gap-2">
+          <input
+            type="checkbox"
+            checked={item.checked}
+            onChange={() => toggleMergedCheck(item.skuId)}
+            className={`mt-1 w-4 h-4 rounded border-gray-300 text-${ringColor}-600`}
+          />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-gray-900">{item.skuName}</p>
+            <p className="text-xs text-gray-400 truncate">{item.skuId}</p>
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-xs text-gray-500">주문 {item.orderedQty}</span>
+              <span className="text-xs text-gray-400">|</span>
+              <span className={`text-xs ${item.isShortage ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
+                재고 {item.inventoryQty}
+              </span>
+            </div>
+            {item.sources.length > 1 && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {item.sources.map((src) => (
+                  <span key={src.woId} className="text-[10px] bg-gray-100 text-gray-500 px-1 rounded">
+                    {src.woDate.slice(5)} ({src.availableQty})
+                  </span>
+                ))}
+              </div>
+            )}
+            <div className="mt-1.5">
+              <input
+                type="number"
+                min={0}
+                value={item.sentQty}
+                onChange={(e) => handleMergedSentChange(item.skuId, parseInt(e.target.value) || 0)}
+                className={`w-20 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-${ringColor}-400 focus:border-${ringColor}-400`}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   // ── 날짜 이동 ──
   const changeDate = (offset: number) => {
@@ -600,6 +698,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                 inventoryQty: item.inventoryQty,
                 isShortage: false,
                 isMarking: item.isMarking,
+                needsMarking: item.needsMarking,
                 checked: true,
                 sources: [],
               };
@@ -1667,6 +1766,12 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
   const checkedMarkingQty = checkedItems.filter((i) => i.isMarking).reduce((s, i) => s + i.sentQty, 0);
   const checkedTotalQty = checkedUniformQty + checkedMarkingQty;
 
+  // 5개 섹션 분류
+  const markingUniform = items.filter((i) => i.needsMarking && !i.isMarking);   // 마킹 작업 예정 - 유니폼
+  const markingMarking = items.filter((i) => i.needsMarking && i.isMarking);    // 마킹 작업 예정 - 마킹
+  const directUniform = items.filter((i) => !i.needsMarking && !i.isMarking);   // 단순 출고 - 유니폼
+  const directMarking = items.filter((i) => !i.needsMarking && i.isMarking);    // 단순 출고 - 마킹
+
   return (
     <div className="space-y-5 max-w-3xl">
       {/* 에러 */}
@@ -1770,15 +1875,31 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                       </label>
                     </div>
 
-                    {/* 총 수량 합계 */}
+                    {/* 총 수량 합계 — 5구분 요약 */}
                     <div className="px-5 py-3 bg-indigo-50/60 border-b border-gray-100 space-y-1">
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-blue-700">유니폼 소계</span>
-                        <span className="font-semibold text-blue-800">{mergedCheckedUniformQty}개</span>
+                      <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+                        <span className="font-semibold text-gray-700">마킹 작업 예정</span>
+                        <span>{mergedCheckedItems.filter(i => i.needsMarking).reduce((s, i) => s + i.sentQty, 0)}개</span>
                       </div>
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-purple-700">마킹 소계</span>
-                        <span className="font-semibold text-purple-800">{mergedCheckedMarkingQty}개</span>
+                      <div className="flex items-center justify-between text-sm pl-3">
+                        <span className="text-blue-700">유니폼</span>
+                        <span className="font-semibold text-blue-800">{mergedCheckedItems.filter(i => i.needsMarking && !i.isMarking).reduce((s, i) => s + i.sentQty, 0)}개</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm pl-3">
+                        <span className="text-purple-700">마킹</span>
+                        <span className="font-semibold text-purple-800">{mergedCheckedItems.filter(i => i.needsMarking && i.isMarking).reduce((s, i) => s + i.sentQty, 0)}개</span>
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-gray-500 mt-2 mb-1">
+                        <span className="font-semibold text-gray-700">단순 출고</span>
+                        <span>{mergedCheckedItems.filter(i => !i.needsMarking).reduce((s, i) => s + i.sentQty, 0)}개</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm pl-3">
+                        <span className="text-teal-700">유니폼</span>
+                        <span className="font-semibold text-teal-800">{mergedCheckedItems.filter(i => !i.needsMarking && !i.isMarking).reduce((s, i) => s + i.sentQty, 0)}개</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm pl-3">
+                        <span className="text-orange-700">마킹</span>
+                        <span className="font-semibold text-orange-800">{mergedCheckedItems.filter(i => !i.needsMarking && i.isMarking).reduce((s, i) => s + i.sentQty, 0)}개</span>
                       </div>
                       <div className="border-t border-indigo-200 pt-1 mt-1 flex items-center justify-between text-sm">
                         <span className="font-bold text-gray-800">총 발송 수량 ({mergedCheckedItems.length}종)</span>
@@ -1795,104 +1916,65 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                       </div>
                     )}
 
-                    {/* 2컬럼 레이아웃 */}
-                    <div className="grid grid-cols-2 text-center text-xs font-semibold py-2 border-b border-gray-100">
-                      <div className="bg-blue-50 rounded-l py-1.5">유니폼 단품 ({mergedItems.filter(i => !i.isMarking).length}종)</div>
-                      <div className="bg-purple-50 rounded-r py-1.5">마킹 단품 ({mergedItems.filter(i => i.isMarking).length}종)</div>
-                    </div>
-
-                    <div className="grid grid-cols-2 min-h-[100px]">
-                      {/* 왼쪽: 유니폼 */}
-                      <div className="border-r border-gray-100 divide-y divide-gray-50">
-                        {mergedItems.filter(i => !i.isMarking).map((item) => (
-                          <div key={item.skuId} className={`px-3 py-2.5 ${item.isShortage ? 'bg-red-50' : ''}`}>
-                            <div className="flex items-start gap-2">
-                              <input
-                                type="checkbox"
-                                checked={item.checked}
-                                onChange={() => toggleMergedCheck(item.skuId)}
-                                className="mt-1 w-4 h-4 rounded border-gray-300 text-blue-600"
-                              />
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium text-gray-900 truncate">{item.skuName}</p>
-                                <p className="text-xs text-gray-400 truncate">{item.skuId}</p>
-                                <div className="flex items-center gap-2 mt-1">
-                                  <span className="text-xs text-gray-500">주문 {item.orderedQty}</span>
-                                  <span className="text-xs text-gray-400">|</span>
-                                  <span className={`text-xs ${item.isShortage ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
-                                    재고 {item.inventoryQty}
-                                  </span>
-                                </div>
-                                {/* 출처 표시 */}
-                                {item.sources.length > 1 && (
-                                  <div className="mt-1 flex flex-wrap gap-1">
-                                    {item.sources.map((src) => (
-                                      <span key={src.woId} className="text-[10px] bg-gray-100 text-gray-500 px-1 rounded">
-                                        {src.woDate.slice(5)} ({src.availableQty})
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-                                <div className="mt-1.5">
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    value={item.sentQty}
-                                    onChange={(e) => handleMergedSentChange(item.skuId, parseInt(e.target.value) || 0)}
-                                    className="w-20 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-400 focus:border-blue-400"
-                                  />
-                                </div>
-                              </div>
-                            </div>
+                    {/* ── 섹션 1: 마킹 작업 예정 ── */}
+                    {(mergedItems.filter(i => i.needsMarking).length > 0) && (
+                      <>
+                        <div className="px-4 py-2 bg-indigo-50 border-b border-indigo-100">
+                          <p className="text-xs font-bold text-indigo-700">
+                            마킹 작업 예정
+                            <span className="font-normal text-indigo-500 ml-1">
+                              ({mergedItems.filter(i => i.needsMarking).length}종 / {mergedCheckedItems.filter(i => i.needsMarking).reduce((s, i) => s + i.sentQty, 0)}개)
+                            </span>
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-2 border-b border-gray-100">
+                          <div className="px-4 py-1.5 border-r border-gray-100 bg-blue-50/70">
+                            <p className="text-[11px] font-semibold text-blue-600">유니폼 ({mergedItems.filter(i => i.needsMarking && !i.isMarking).length}종)</p>
                           </div>
-                        ))}
-                      </div>
-
-                      {/* 오른쪽: 마킹 */}
-                      <div className="divide-y divide-gray-50">
-                        {mergedItems.filter(i => i.isMarking).map((item) => (
-                          <div key={item.skuId} className={`px-3 py-2.5 ${item.isShortage ? 'bg-red-50' : ''}`}>
-                            <div className="flex items-start gap-2">
-                              <input
-                                type="checkbox"
-                                checked={item.checked}
-                                onChange={() => toggleMergedCheck(item.skuId)}
-                                className="mt-1 w-4 h-4 rounded border-gray-300 text-purple-600"
-                              />
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium text-gray-900 truncate">{item.skuName}</p>
-                                <p className="text-xs text-gray-400 truncate">{item.skuId}</p>
-                                <div className="flex items-center gap-2 mt-1">
-                                  <span className="text-xs text-gray-500">주문 {item.orderedQty}</span>
-                                  <span className="text-xs text-gray-400">|</span>
-                                  <span className={`text-xs ${item.isShortage ? 'text-red-600 font-medium' : 'text-gray-500'}`}>
-                                    재고 {item.inventoryQty}
-                                  </span>
-                                </div>
-                                {item.sources.length > 1 && (
-                                  <div className="mt-1 flex flex-wrap gap-1">
-                                    {item.sources.map((src) => (
-                                      <span key={src.woId} className="text-[10px] bg-gray-100 text-gray-500 px-1 rounded">
-                                        {src.woDate.slice(5)} ({src.availableQty})
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-                                <div className="mt-1.5">
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    value={item.sentQty}
-                                    onChange={(e) => handleMergedSentChange(item.skuId, parseInt(e.target.value) || 0)}
-                                    className="w-20 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-purple-400 focus:border-purple-400"
-                                  />
-                                </div>
-                              </div>
-                            </div>
+                          <div className="px-4 py-1.5 bg-purple-50/70">
+                            <p className="text-[11px] font-semibold text-purple-600">마킹 ({mergedItems.filter(i => i.needsMarking && i.isMarking).length}종)</p>
                           </div>
-                        ))}
-                      </div>
-                    </div>
+                        </div>
+                        <div className="grid grid-cols-2">
+                          <div className="border-r border-gray-100 divide-y divide-gray-50">
+                            {mergedItems.filter(i => i.needsMarking && !i.isMarking).map((item) => renderMergedItemCard(item, 'blue'))}
+                          </div>
+                          <div className="divide-y divide-gray-50">
+                            {mergedItems.filter(i => i.needsMarking && i.isMarking).map((item) => renderMergedItemCard(item, 'purple'))}
+                          </div>
+                        </div>
+                      </>
+                    )}
+
+                    {/* ── 섹션 2: 단순 출고 ── */}
+                    {(mergedItems.filter(i => !i.needsMarking).length > 0) && (
+                      <>
+                        <div className="px-4 py-2 bg-gray-50 border-b border-gray-200 border-t border-gray-200">
+                          <p className="text-xs font-bold text-gray-700">
+                            단순 출고 (마킹 없음)
+                            <span className="font-normal text-gray-500 ml-1">
+                              ({mergedItems.filter(i => !i.needsMarking).length}종 / {mergedCheckedItems.filter(i => !i.needsMarking).reduce((s, i) => s + i.sentQty, 0)}개)
+                            </span>
+                          </p>
+                        </div>
+                        <div className="grid grid-cols-2 border-b border-gray-100">
+                          <div className="px-4 py-1.5 border-r border-gray-100 bg-teal-50/70">
+                            <p className="text-[11px] font-semibold text-teal-600">유니폼 ({mergedItems.filter(i => !i.needsMarking && !i.isMarking).length}종)</p>
+                          </div>
+                          <div className="px-4 py-1.5 bg-orange-50/70">
+                            <p className="text-[11px] font-semibold text-orange-600">마킹 ({mergedItems.filter(i => !i.needsMarking && i.isMarking).length}종)</p>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2">
+                          <div className="border-r border-gray-100 divide-y divide-gray-50">
+                            {mergedItems.filter(i => !i.needsMarking && !i.isMarking).map((item) => renderMergedItemCard(item, 'teal'))}
+                          </div>
+                          <div className="divide-y divide-gray-50">
+                            {mergedItems.filter(i => !i.needsMarking && i.isMarking).map((item) => renderMergedItemCard(item, 'orange'))}
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
 
                   {/* 발송 확인 버튼 */}
@@ -2069,15 +2151,31 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           </label>
         </div>
 
-        {/* 총 수량 합계 (체크된 품목만) */}
+        {/* 총 수량 합계 (체크된 품목만) — 5구분 요약 */}
         <div className="px-5 py-3 bg-blue-50/60 border-b border-gray-100 space-y-1">
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-blue-700">유니폼 소계</span>
-            <span className="font-semibold text-blue-800">{checkedUniformQty}개</span>
+          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+            <span className="font-semibold text-gray-700">마킹 작업 예정</span>
+            <span>{checkedItems.filter(i => i.needsMarking).reduce((s, i) => s + i.sentQty, 0)}개</span>
           </div>
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-purple-700">마킹 소계</span>
-            <span className="font-semibold text-purple-800">{checkedMarkingQty}개</span>
+          <div className="flex items-center justify-between text-sm pl-3">
+            <span className="text-blue-700">유니폼</span>
+            <span className="font-semibold text-blue-800">{checkedItems.filter(i => i.needsMarking && !i.isMarking).reduce((s, i) => s + i.sentQty, 0)}개</span>
+          </div>
+          <div className="flex items-center justify-between text-sm pl-3">
+            <span className="text-purple-700">마킹</span>
+            <span className="font-semibold text-purple-800">{checkedItems.filter(i => i.needsMarking && i.isMarking).reduce((s, i) => s + i.sentQty, 0)}개</span>
+          </div>
+          <div className="flex items-center justify-between text-xs text-gray-500 mt-2 mb-1">
+            <span className="font-semibold text-gray-700">단순 출고</span>
+            <span>{checkedItems.filter(i => !i.needsMarking).reduce((s, i) => s + i.sentQty, 0)}개</span>
+          </div>
+          <div className="flex items-center justify-between text-sm pl-3">
+            <span className="text-teal-700">유니폼</span>
+            <span className="font-semibold text-teal-800">{checkedItems.filter(i => !i.needsMarking && !i.isMarking).reduce((s, i) => s + i.sentQty, 0)}개</span>
+          </div>
+          <div className="flex items-center justify-between text-sm pl-3">
+            <span className="text-orange-700">마킹</span>
+            <span className="font-semibold text-orange-800">{checkedItems.filter(i => !i.needsMarking && i.isMarking).reduce((s, i) => s + i.sentQty, 0)}개</span>
           </div>
           <div className="border-t border-blue-200 pt-1 mt-1 flex items-center justify-between text-sm">
             <span className="font-bold text-gray-800">총 발송 수량 ({checkedItems.length}종)</span>
@@ -2094,108 +2192,65 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           </div>
         )}
 
-        {/* 2컬럼 헤더 */}
-        <div className="grid grid-cols-2 border-b border-gray-100">
-          <div className="px-4 py-2.5 border-r border-gray-100 bg-blue-50">
-            <p className="text-xs font-semibold text-blue-700">
-              유니폼 단품 <span className="font-normal text-blue-500">({items.filter((i) => !i.isMarking).length}종)</span>
-            </p>
-          </div>
-          <div className="px-4 py-2.5 bg-purple-50">
-            <p className="text-xs font-semibold text-purple-700">
-              마킹 단품 <span className="font-normal text-purple-500">({items.filter((i) => i.isMarking).length}종)</span>
-            </p>
-          </div>
-        </div>
-
-        {/* 2컬럼 아이템 (체크박스 포함) */}
-        <div className="grid grid-cols-2">
-          {/* 왼쪽: 유니폼 */}
-          <div className="border-r border-gray-100 divide-y divide-gray-50">
-            {items.filter((item) => !item.isMarking).map((item) => (
-              <div key={item.skuId} className={`px-3 py-3 ${item.isShortage ? 'bg-red-50' : ''} ${!item.checked ? 'opacity-40' : ''}`}>
-                <div className="flex items-start gap-1.5">
-                  <input
-                    type="checkbox"
-                    checked={item.checked}
-                    onChange={() => toggleCheck(item.skuId)}
-                    className="w-3.5 h-3.5 mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 flex-shrink-0"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-800 leading-snug">{item.skuName}</p>
-                    <p className="text-[11px] text-gray-400 font-mono mt-0.5">{item.skuId}</p>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between mt-1.5 gap-1 ml-5">
-                  <div>
-                    <p className="text-[10px] text-gray-400">주문 {item.orderedQty}</p>
-                    {item.isShortage ? (
-                      <p className="text-[10px] text-red-500">재고 {item.inventoryQty}</p>
-                    ) : (
-                      <p className="text-[10px] text-gray-400">재고 {item.inventoryQty}</p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-0.5">
-                    <input
-                      type="number"
-                      min="0"
-                      value={item.sentQty}
-                      onChange={(e) => handleSentChange(item.skuId, Number(e.target.value))}
-                      disabled={!item.checked}
-                      className={`w-16 border rounded-lg px-1.5 py-1 text-xs text-right focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 ${
-                        item.sentQty > item.inventoryQty ? 'border-orange-300 bg-orange-50' : 'border-gray-300'
-                      }`}
-                    />
-                    <span className="text-[10px] text-gray-400">개</span>
-                  </div>
-                </div>
+        {/* ── 섹션 1: 마킹 작업 예정 (유니폼 + 마킹 2컬럼) ── */}
+        {(markingUniform.length > 0 || markingMarking.length > 0) && (
+          <>
+            <div className="px-4 py-2 bg-indigo-50 border-b border-indigo-100">
+              <p className="text-xs font-bold text-indigo-700">
+                마킹 작업 예정
+                <span className="font-normal text-indigo-500 ml-1">
+                  ({markingUniform.length + markingMarking.length}종 / {checkedItems.filter(i => i.needsMarking).reduce((s, i) => s + i.sentQty, 0)}개)
+                </span>
+              </p>
+            </div>
+            <div className="grid grid-cols-2 border-b border-gray-100">
+              <div className="px-4 py-1.5 border-r border-gray-100 bg-blue-50/70">
+                <p className="text-[11px] font-semibold text-blue-600">유니폼 ({markingUniform.length}종)</p>
               </div>
-            ))}
-          </div>
-
-          {/* 오른쪽: 마킹 */}
-          <div className="divide-y divide-gray-50">
-            {items.filter((item) => item.isMarking).map((item) => (
-              <div key={item.skuId} className={`px-3 py-3 ${item.isShortage ? 'bg-red-50' : ''} ${!item.checked ? 'opacity-40' : ''}`}>
-                <div className="flex items-start gap-1.5">
-                  <input
-                    type="checkbox"
-                    checked={item.checked}
-                    onChange={() => toggleCheck(item.skuId)}
-                    className="w-3.5 h-3.5 mt-0.5 rounded border-gray-300 text-purple-600 focus:ring-purple-500 flex-shrink-0"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-800 leading-snug">{item.skuName}</p>
-                    <p className="text-[11px] text-gray-400 font-mono mt-0.5">{item.skuId}</p>
-                  </div>
-                </div>
-                <div className="flex items-center justify-between mt-1.5 gap-1 ml-5">
-                  <div>
-                    <p className="text-[10px] text-gray-400">주문 {item.orderedQty}</p>
-                    {item.isShortage ? (
-                      <p className="text-[10px] text-red-500">재고 {item.inventoryQty}</p>
-                    ) : (
-                      <p className="text-[10px] text-gray-400">재고 {item.inventoryQty}</p>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-0.5">
-                    <input
-                      type="number"
-                      min="0"
-                      value={item.sentQty}
-                      onChange={(e) => handleSentChange(item.skuId, Number(e.target.value))}
-                      disabled={!item.checked}
-                      className={`w-16 border rounded-lg px-1.5 py-1 text-xs text-right focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:bg-gray-100 ${
-                        item.sentQty > item.inventoryQty ? 'border-orange-300 bg-orange-50' : 'border-gray-300'
-                      }`}
-                    />
-                    <span className="text-[10px] text-gray-400">개</span>
-                  </div>
-                </div>
+              <div className="px-4 py-1.5 bg-purple-50/70">
+                <p className="text-[11px] font-semibold text-purple-600">마킹 ({markingMarking.length}종)</p>
               </div>
-            ))}
-          </div>
-        </div>
+            </div>
+            <div className="grid grid-cols-2">
+              <div className="border-r border-gray-100 divide-y divide-gray-50">
+                {markingUniform.map((item) => renderItemCard(item, 'blue'))}
+              </div>
+              <div className="divide-y divide-gray-50">
+                {markingMarking.map((item) => renderItemCard(item, 'purple'))}
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* ── 섹션 2: 단순 출고 (유니폼 + 마킹 2컬럼) ── */}
+        {(directUniform.length > 0 || directMarking.length > 0) && (
+          <>
+            <div className="px-4 py-2 bg-gray-50 border-b border-gray-200 border-t border-gray-200">
+              <p className="text-xs font-bold text-gray-700">
+                단순 출고 (마킹 없음)
+                <span className="font-normal text-gray-500 ml-1">
+                  ({directUniform.length + directMarking.length}종 / {checkedItems.filter(i => !i.needsMarking).reduce((s, i) => s + i.sentQty, 0)}개)
+                </span>
+              </p>
+            </div>
+            <div className="grid grid-cols-2 border-b border-gray-100">
+              <div className="px-4 py-1.5 border-r border-gray-100 bg-teal-50/70">
+                <p className="text-[11px] font-semibold text-teal-600">유니폼 ({directUniform.length}종)</p>
+              </div>
+              <div className="px-4 py-1.5 bg-orange-50/70">
+                <p className="text-[11px] font-semibold text-orange-600">마킹 ({directMarking.length}종)</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2">
+              <div className="border-r border-gray-100 divide-y divide-gray-50">
+                {directUniform.map((item) => renderItemCard(item, 'teal'))}
+              </div>
+              <div className="divide-y divide-gray-50">
+                {directMarking.map((item) => renderItemCard(item, 'orange'))}
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* 진행 표시 */}
