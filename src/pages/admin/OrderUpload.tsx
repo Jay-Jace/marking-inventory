@@ -50,7 +50,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         const { data, error } = await supabaseAdmin
           .from('online_order')
           .select('*')
-          .order('created_at', { ascending: false })
+          .order('order_date', { ascending: true })
           .range(offset, offset + 999);
         if (error) throw error;
         if (!data || data.length === 0) break;
@@ -491,6 +491,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-gray-50 border-b">
+                <th className="px-2 py-2 text-left">주문일시</th>
                 <th className="px-2 py-2 text-left">주문번호</th>
                 <th className="px-2 py-2 text-left">배송번호</th>
                 <th className="px-2 py-2 text-left">SKU</th>
@@ -504,14 +505,15 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             </thead>
             <tbody>
               {dashLoading ? (
-                <tr><td colSpan={9} className="px-4 py-12 text-center text-gray-400">불러오는 중...</td></tr>
+                <tr><td colSpan={10} className="px-4 py-12 text-center text-gray-400">불러오는 중...</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={9} className="px-4 py-12 text-center text-gray-400">
+                <tr><td colSpan={10} className="px-4 py-12 text-center text-gray-400">
                   {totalCount === 0 ? '등록된 주문이 없습니다. 엑셀을 업로드하세요.' : '검색 결과가 없습니다.'}
                 </td></tr>
               ) : (
                 filtered.slice(0, 200).map(o => (
                   <tr key={o.id} className="border-t border-gray-50 hover:bg-gray-50">
+                    <td className="px-2 py-1.5 text-xs text-gray-500 whitespace-nowrap">{o.order_date ? o.order_date.slice(0, 16).replace('T', ' ') : '-'}</td>
                     <td className="px-2 py-1.5 font-mono text-xs text-gray-600">{o.order_number}</td>
                     <td className="px-2 py-1.5 font-mono text-xs text-gray-400">{o.delivery_number}</td>
                     <td className="px-2 py-1.5 font-mono text-xs text-gray-500">{o.sku_id}</td>
