@@ -17,6 +17,7 @@ interface ReceiptItem {
   expectedQty: number;
   actualQty: number;
   isMarking: boolean;
+  needsMarking: boolean; // true=마킹 작업 예정, false=단품 출고
 }
 
 interface PendingOrder {
@@ -169,28 +170,41 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
         return;
       }
 
-      // barcode 조회를 위해 SKU 테이블에서 가져오기
+      // barcode + needs_marking 조회
       const skuIds = waveItems.map((i) => i.skuId);
-      const { data: skuData } = await supabase
-        .from('sku')
-        .select('sku_id, barcode')
-        .in('sku_id', skuIds);
+      const [skuRes, wolRes] = await Promise.all([
+        supabase.from('sku').select('sku_id, barcode').in('sku_id', skuIds),
+        supabase.from('work_order_line').select('finished_sku_id, needs_marking').eq('work_order_id', wo.id),
+      ]);
       if (isStale()) return;
 
       const barcodeMap: Record<string, string | null> = {};
-      for (const s of (skuData || []) as any[]) {
+      for (const s of (skuRes.data || []) as any[]) {
         barcodeMap[s.sku_id] = s.barcode || null;
       }
 
+      // work_order_line의 needs_marking 맵 (finished_sku_id 기준)
+      const needsMarkingMap: Record<string, boolean> = {};
+      for (const l of (wolRes.data || []) as any[]) {
+        needsMarkingMap[l.finished_sku_id] = l.needs_marking;
+      }
+
       // waveItems가 곧 expectedQty (발송 시 이미 단품으로 전개됨)
-      setItems(waveItems.map((item) => ({
-        skuId: item.skuId,
-        skuName: item.skuName,
-        barcode: barcodeMap[item.skuId] || null,
-        expectedQty: item.sentQty,
-        actualQty: item.sentQty,
-        isMarking: item.skuId?.includes('MK') || item.skuName?.includes('마킹') || false,
-      })));
+      setItems(waveItems.map((item) => {
+        const isMarking = item.skuId?.includes('MK') || item.skuName?.includes('마킹') || false;
+        // needsMarking: work_order_line에서 해당 SKU가 마킹 작업 예정인지
+        // 구성품(BOM전개된)은 부모 finished_sku에서 판단 필요 → 일단 해당 SKU가 line에 있으면 그 값, 없으면 isMarking 기준
+        const needsMarking = needsMarkingMap[item.skuId] ?? isMarking;
+        return {
+          skuId: item.skuId,
+          skuName: item.skuName,
+          barcode: barcodeMap[item.skuId] || null,
+          expectedQty: item.sentQty,
+          actualQty: item.sentQty,
+          isMarking,
+          needsMarking,
+        };
+      }));
     } catch (e: any) {
       if (!isStale()) setError(`입고 데이터 조회 실패: ${e.message || '알 수 없는 오류'}`);
     } finally {
@@ -741,6 +755,10 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
   const totalMarkingQty = items.filter((i) => i.isMarking).reduce((s, i) => s + i.expectedQty, 0);
   const totalReceiptQty = totalUniformQty + totalMarkingQty;
 
+  // 마킹 작업 예정 vs 단품 출고 분류
+  const markingWorkItems = items.filter((i) => i.needsMarking);
+  const directShipItems = items.filter((i) => !i.needsMarking);
+
   return (
     <div className="space-y-5 max-w-3xl">
       {/* 에러 */}
@@ -946,13 +964,13 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
 
         {/* 총 수량 합계 */}
         <div className="px-5 py-3 bg-blue-50/60 border-b border-gray-100 space-y-1">
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-blue-700">유니폼 소계</span>
-            <span className="font-semibold text-blue-800">{totalUniformQty}개</span>
+          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+            <span className="font-semibold text-indigo-700">마킹 작업 예정</span>
+            <span>{markingWorkItems.reduce((s, i) => s + i.expectedQty, 0)}개 ({markingWorkItems.length}종)</span>
           </div>
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-purple-700">마킹 소계</span>
-            <span className="font-semibold text-purple-800">{totalMarkingQty}개</span>
+          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+            <span className="font-semibold text-teal-700">단품 출고 (마킹 불필요)</span>
+            <span>{directShipItems.reduce((s, i) => s + i.expectedQty, 0)}개 ({directShipItems.length}종)</span>
           </div>
           <div className="border-t border-blue-200 pt-1 mt-1 flex items-center justify-between text-sm">
             <span className="font-bold text-gray-800">총 입고 수량</span>
