@@ -20,6 +20,7 @@ import {
   Package,
   BookOpen,
   ShoppingCart,
+  List,
 } from 'lucide-react';
 
 interface NavItem {
@@ -82,6 +83,12 @@ const navItems: NavItem[] = [
     label: '재고 수불부',
     path: '/admin/stock-ledger',
     icon: <BookOpen size={18} />,
+    roles: ['admin'],
+  },
+  {
+    label: '품목 마스터',
+    path: '/admin/sku-master',
+    icon: <List size={18} />,
     roles: ['admin'],
   },
   {
