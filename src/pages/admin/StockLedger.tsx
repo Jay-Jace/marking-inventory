@@ -140,9 +140,41 @@ export default function StockLedger() {
         : [];
       const txData = await fetchAllTransactions(startDate, endDate);
 
-      // 기초재고 맵 (시작일 이전 트랜잭션 누적, 2026-02-01 기준 0에서 시작)
+      // ── SKU 정보 먼저 조회 → base_barcode 매핑 생성 ──
+      const allTxSkuIds = new Set<string>();
+      for (const tx of [...preTxData, ...txData]) allTxSkuIds.add(tx.sku_id);
+
+      // sku_id → { name, barcode, baseBarcode } 매핑
+      const skuLookup: Record<string, { name: string; barcode: string; baseBarcode: string }> = {};
+      const skuIdArr = [...allTxSkuIds];
+      for (let i = 0; i < skuIdArr.length; i += 500) {
+        const batch = skuIdArr.slice(i, i + 500);
+        const { data: skuData } = await supabase
+          .from('sku')
+          .select('sku_id, sku_name, barcode')
+          .in('sku_id', batch);
+        if (skuData) {
+          for (const s of skuData) {
+            const base = s.barcode ? s.barcode.split('_')[0] : '';
+            skuLookup[s.sku_id] = {
+              name: s.sku_name || s.sku_id,
+              barcode: s.barcode || '',
+              baseBarcode: base,
+            };
+          }
+        }
+      }
+
+      // key 생성 헬퍼: base_barcode가 있으면 합산, 없으면 sku_id 개별
+      const makeKey = (whId: string, skuId: string) => {
+        const info = skuLookup[skuId];
+        const groupId = info?.baseBarcode || skuId;
+        return `${whId}|${groupId}`;
+      };
+
+      // 기초재고 맵 (시작일 이전 트랜잭션 누적, base_barcode 기준 합산)
       for (const tx of preTxData) {
-        const key = `${tx.warehouse_id}|${tx.sku_id}`;
+        const key = makeKey(tx.warehouse_id, tx.sku_id);
         if (!openingMap[key]) openingMap[key] = 0;
         switch (tx.tx_type as TxType) {
           case '입고': openingMap[key] += tx.quantity; break;
@@ -156,9 +188,9 @@ export default function StockLedger() {
         }
       }
 
-      // 기간내 트랜잭션 집계
+      // 기간내 트랜잭션 집계 (base_barcode 기준 합산)
       for (const tx of txData) {
-        const key = `${tx.warehouse_id}|${tx.sku_id}`;
+        const key = makeKey(tx.warehouse_id, tx.sku_id);
         if (!txMap[key]) txMap[key] = { in: 0, out: 0, return: 0, adjust: 0, markingOut: 0, markingIn: 0, sales: 0 };
         switch (tx.tx_type as TxType) {
           case '입고': txMap[key].in += tx.quantity; break;
@@ -172,35 +204,38 @@ export default function StockLedger() {
         }
       }
 
-      // 모든 SKU 키 수집
+      // 모든 그룹 키 수집
       const allKeys = new Set<string>();
       for (const key of Object.keys(openingMap)) allKeys.add(key);
       for (const key of Object.keys(txMap)) allKeys.add(key);
 
-      // SKU 정보 조회 (500건씩 배치)
-      const skuInfoMap: Record<string, { name: string; barcode: string; whName: string }> = {};
-      const allSkuIds = [...new Set([...allKeys].map((k) => k.split('|')[1]))];
-      for (let i = 0; i < allSkuIds.length; i += 500) {
-        const batch = allSkuIds.slice(i, i + 500);
-        const { data: skuData } = await supabase
-          .from('sku')
-          .select('sku_id, sku_name, barcode')
-          .in('sku_id', batch);
-        if (skuData) {
-          const skuMap = new Map(skuData.map((s) => [s.sku_id, s]));
-          for (const key of allKeys) {
-            if (skuInfoMap[key]) continue;
-            const [whId, skuId] = key.split('|');
-            const sku = skuMap.get(skuId);
-            if (!sku) continue;
-            const wh = warehouses.find((w) => w.id === whId);
-            skuInfoMap[key] = {
-              name: sku?.sku_name || skuId,
-              barcode: sku?.barcode || '',
-              whName: wh?.name || '',
-            };
+      // 그룹 키별 대표 SKU 정보 결정
+      // base_barcode → 대표 상품명/바코드 (접미사 없는 SKU 우선)
+      const groupInfo: Record<string, { name: string; barcode: string; skuId: string; whName: string }> = {};
+      for (const key of allKeys) {
+        const [whId, groupId] = key.split('|');
+        const wh = warehouses.find((w) => w.id === whId);
+        const whName = wh?.name || '';
+
+        // 이 그룹에 해당하는 SKU 중 대표 선택
+        let bestName = groupId;
+        let bestBarcode = groupId;
+        let bestSkuId = groupId;
+        let hasPure = false; // 접미사 없는 바코드가 있는지
+
+        for (const [skuId, info] of Object.entries(skuLookup)) {
+          if (info.baseBarcode === groupId || skuId === groupId) {
+            const isPure = info.barcode === groupId; // 접미사 없는 순수 바코드
+            if (!hasPure || isPure) {
+              bestName = info.name;
+              bestBarcode = info.baseBarcode || info.barcode;
+              bestSkuId = skuId;
+              if (isPure) hasPure = true;
+            }
           }
         }
+
+        groupInfo[key] = { name: bestName, barcode: bestBarcode, skuId: bestSkuId, whName };
       }
 
       // 수불부 행 계산: 기말 = 기초 + 입고 - 이동출고 + 반품 + 조정 - 마킹출고 + 마킹입고 - 판매
@@ -209,13 +244,13 @@ export default function StockLedger() {
         const opening = Math.max(0, openingMap[key] || 0);
         const tx = txMap[key] || { in: 0, out: 0, return: 0, adjust: 0, markingOut: 0, markingIn: 0, sales: 0 };
         const closing = opening + tx.in - tx.out + tx.return + tx.adjust - tx.markingOut + tx.markingIn - tx.sales;
-        const info = skuInfoMap[key] || { name: '', barcode: '', whName: '' };
+        const info = groupInfo[key] || { name: '', barcode: '', skuId: '', whName: '' };
 
         if (opening === 0 && closing === 0 && tx.in === 0 && tx.out === 0 && tx.return === 0 && tx.adjust === 0 && tx.markingOut === 0 && tx.markingIn === 0 && tx.sales === 0) continue;
 
         ledgerRows.push({
           warehouseName: info.whName,
-          skuId: key.split('|')[1],
+          skuId: info.skuId,
           barcode: info.barcode,
           skuName: info.name,
           opening,
@@ -230,8 +265,8 @@ export default function StockLedger() {
         });
       }
 
-      // 정렬: 창고명 → SKU코드
-      ledgerRows.sort((a, b) => a.warehouseName.localeCompare(b.warehouseName) || a.skuId.localeCompare(b.skuId));
+      // 정렬: 창고명 → 바코드 → SKU코드
+      ledgerRows.sort((a, b) => a.warehouseName.localeCompare(b.warehouseName) || a.barcode.localeCompare(b.barcode) || a.skuId.localeCompare(b.skuId));
       if (!isStale()) setRows(ledgerRows);
     } catch (err: any) {
       console.error('수불부 조회 실패:', err);
