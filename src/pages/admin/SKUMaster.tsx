@@ -555,7 +555,7 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
                 <th className="px-3 py-2.5 text-left font-semibold text-gray-700 w-[200px]">SKU코드</th>
                 <th className="px-3 py-2.5 text-left font-semibold text-gray-700 w-[150px]">바코드</th>
                 <th className="px-3 py-2.5 text-left font-semibold text-gray-700">상품명</th>
-                <th className="px-3 py-2.5 text-left font-semibold text-gray-700 w-[90px]">타입</th>
+                <th className="px-3 py-2.5 text-left font-semibold text-gray-700 w-[120px]">타입</th>
                 <th className="px-3 py-2.5 text-center font-semibold text-gray-700 w-[80px]">액션</th>
               </tr>
             </thead>
