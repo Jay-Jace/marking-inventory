@@ -5,9 +5,11 @@ import { recordTransactionBatch, validateTransactionBatch, deleteCjTransactions,
 import type { ValidationError } from '../../lib/inventoryTransaction';
 import { parseCjShipment, parseCjReceipt, parseCjReturn, detectCjFileType } from '../../lib/cjExcelParser';
 import type { CjTransaction } from '../../lib/cjExcelParser';
+import { parseOfflineStockExcel } from '../../lib/offlineStockParser';
+import type { OfflineStockParseResult } from '../../lib/offlineStockParser';
 import type { TxType } from '../../types';
 import * as XLSX from 'xlsx';
-import { Upload, Download, Search, X, AlertTriangle, CheckCircle, SkipForward, FileUp, Trash2 } from 'lucide-react';
+import { Upload, Download, Search, X, AlertTriangle, CheckCircle, SkipForward, FileUp, Trash2, Store } from 'lucide-react';
 
 interface LedgerRow {
   warehouseName: string;
@@ -59,6 +61,13 @@ export default function StockLedger() {
   const [deleting, setDeleting] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
 
+  // 매장수불 업로드
+  const [offlineParseResult, setOfflineParseResult] = useState<OfflineStockParseResult | null>(null);
+  const [offlineMapped, setOfflineMapped] = useState<{ skuId: string; barcode: string; skuName: string; date: string; quantity: number; type: TxType }[]>([]);
+  const [offlineUnmatched, setOfflineUnmatched] = useState<{ barcode: string; skuName: string }[]>([]);
+  const [offlineUploading, setOfflineUploading] = useState(false);
+  const [offlineUploadResult, setOfflineUploadResult] = useState<string | null>(null);
+  const [offlineUploadProgress, setOfflineUploadProgress] = useState<{ current: number; total: number } | null>(null);
   // 창고 목록
   const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
 
@@ -438,6 +447,127 @@ export default function StockLedger() {
     fetchCjStatus();
   };
 
+  // ── 매장수불 업로드 핸들러 ──
+  const handleOfflineFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = ''; // reset
+
+    setOfflineParseResult(null);
+    setOfflineMapped([]);
+    setOfflineUnmatched([]);
+    setOfflineUploadResult(null);
+
+    try {
+      const ab = await file.arrayBuffer();
+      const wb = XLSX.read(ab);
+      const result = parseOfflineStockExcel(wb);
+
+      if (result.transactions.length === 0) {
+        setOfflineUploadResult('파싱된 트랜잭션이 없습니다.');
+        return;
+      }
+      setOfflineParseResult(result);
+
+      // 바코드 → SKU ID 매핑
+      const uniqueBarcodes = [...new Set(result.transactions.map((t) => t.barcode))];
+      const bcToSku: Record<string, { skuId: string; skuName: string }> = {};
+      for (let i = 0; i < uniqueBarcodes.length; i += 500) {
+        const batch = uniqueBarcodes.slice(i, i + 500);
+        const { data } = await supabase.from('sku').select('sku_id, sku_name, barcode').in('barcode', batch);
+        for (const s of (data || []) as any[]) {
+          if (s.barcode) bcToSku[s.barcode] = { skuId: s.sku_id, skuName: s.sku_name };
+        }
+      }
+
+      const mapped: typeof offlineMapped = [];
+      const unmatchedSet = new Map<string, string>();
+
+      for (const tx of result.transactions) {
+        const sku = bcToSku[tx.barcode];
+        if (sku) {
+          mapped.push({
+            skuId: sku.skuId,
+            barcode: tx.barcode,
+            skuName: sku.skuName,
+            date: tx.date,
+            quantity: tx.quantity,
+            type: tx.type,
+          });
+        } else {
+          unmatchedSet.set(tx.barcode, tx.skuName);
+        }
+      }
+
+      setOfflineMapped(mapped);
+      setOfflineUnmatched([...unmatchedSet].map(([barcode, skuName]) => ({ barcode, skuName })));
+    } catch (err: any) {
+      setOfflineUploadResult(`파싱 오류: ${err.message}`);
+    }
+  };
+
+  const handleOfflineSave = async () => {
+    if (offlineMapped.length === 0) return;
+    const offWhId = warehouses.find((w) => w.name === '오프라인샵')?.id;
+    if (!offWhId) { setOfflineUploadResult('오프라인샵 창고를 찾을 수 없습니다.'); return; }
+
+    setOfflineUploading(true);
+    setOfflineUploadResult(null);
+
+    // 양수/음수 분리 (recordTransactionBatch는 quantity>0만 처리)
+    const positive = offlineMapped.filter((t) => t.quantity > 0);
+    const negative = offlineMapped.filter((t) => t.quantity < 0);
+
+    const skuNameMap = new Map(offlineMapped.map((t) => [t.skuId, t.skuName]));
+
+    let totalSuccess = 0;
+    let totalFailed = 0;
+
+    // 양수 배치
+    if (positive.length > 0) {
+      const result = await recordTransactionBatch(
+        positive.map((t) => ({
+          warehouseId: offWhId,
+          skuId: t.skuId,
+          txType: t.type,
+          quantity: t.quantity,
+          source: 'pos_excel' as const,
+          txDate: t.date,
+          memo: `매장수불:${t.date}:${t.type}`,
+        })),
+        skuNameMap,
+        (cur, tot) => setOfflineUploadProgress({ current: cur, total: tot }),
+      );
+      totalSuccess += result.success;
+      totalFailed += result.failed;
+    }
+
+    // 음수(재고조정) 개별 처리
+    for (const t of negative) {
+      const { recordTransaction } = await import('../../lib/inventoryTransaction');
+      await recordTransaction({
+        warehouseId: offWhId,
+        skuId: t.skuId,
+        txType: t.type,
+        quantity: t.quantity,
+        source: 'pos_excel',
+        txDate: t.date,
+        memo: `매장수불:${t.date}:${t.type}`,
+      });
+      totalSuccess++;
+    }
+
+    setOfflineUploadProgress(null);
+    setOfflineUploading(false);
+    setOfflineUploadResult(
+      `저장 완료: ${totalSuccess}건 성공${totalFailed > 0 ? `, ${totalFailed}건 실패` : ''}` +
+      (offlineUnmatched.length > 0 ? ` (매핑 실패 ${offlineUnmatched.length}종 제외)` : '')
+    );
+    setOfflineMapped([]);
+    setOfflineParseResult(null);
+    fetchLedger();
+  };
+
   // CJ 데이터 삭제 모달 열기
   const openDeleteModal = (type: TxType, minDate: string, maxDate: string) => {
     setDeleteModal({ type, minDate, maxDate });
@@ -803,6 +933,79 @@ export default function StockLedger() {
           {uploadResult}
         </div>
       )}
+
+      {/* ── 매장수불 업로드 ── */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Store size={18} className="text-green-600" />
+            <h3 className="font-semibold text-gray-800">매장 수불부 업로드</h3>
+          </div>
+          <label className="cursor-pointer bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors">
+            <Upload size={14} />
+            엑셀 선택
+            <input type="file" accept=".xls,.xlsx" className="hidden" onChange={handleOfflineFileUpload} />
+          </label>
+        </div>
+        <p className="text-xs text-gray-500 mb-3">
+          오프라인 매장 수불부 엑셀을 업로드하면 기초재고/입고/판매/재고조정이 자동 반영됩니다.
+          (이동출고는 발송확인으로 이미 기록되어 있어 제외됩니다)
+        </p>
+
+        {/* 파싱 결과 미리보기 */}
+        {offlineParseResult && offlineMapped.length > 0 && (
+          <div className="space-y-3">
+            <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-sm">
+              <p className="font-medium text-green-800 mb-1">파싱 완료</p>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-green-700">
+                <span>기간: {offlineParseResult.dateRange.min} ~ {offlineParseResult.dateRange.max}</span>
+                <span>품목: {offlineParseResult.productCount}종</span>
+                {Object.entries(offlineParseResult.summary).map(([type, count]) => (
+                  <span key={type}>{type}: {count}건</span>
+                ))}
+                <span className="font-semibold">매핑 성공: {offlineMapped.length}건</span>
+              </div>
+            </div>
+
+            {offlineUnmatched.length > 0 && (
+              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm">
+                <p className="font-medium text-yellow-800 mb-1">
+                  <AlertTriangle size={14} className="inline mr-1" />
+                  바코드 매핑 실패 ({offlineUnmatched.length}종) — 아래 품목은 제외됩니다
+                </p>
+                <div className="max-h-24 overflow-y-auto text-xs text-yellow-700 space-y-0.5">
+                  {offlineUnmatched.map((u) => (
+                    <div key={u.barcode}>{u.barcode} — {u.skuName}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <button
+              onClick={handleOfflineSave}
+              disabled={offlineUploading}
+              className="w-full py-2.5 rounded-lg text-white font-medium bg-green-600 hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
+            >
+              {offlineUploading ? '저장 중...' : `DB 저장 (${offlineMapped.length}건)`}
+            </button>
+
+            {offlineUploadProgress && (
+              <div className="w-full bg-gray-200 rounded-full h-2">
+                <div
+                  className="bg-green-600 h-2 rounded-full transition-all"
+                  style={{ width: `${Math.round((offlineUploadProgress.current / offlineUploadProgress.total) * 100)}%` }}
+                />
+              </div>
+            )}
+          </div>
+        )}
+
+        {offlineUploadResult && !offlineUploading && (
+          <div className={`rounded-lg p-3 text-sm mt-3 ${offlineUploadResult.includes('오류') ? 'bg-red-50 border border-red-200 text-red-800' : 'bg-blue-50 border border-blue-200 text-blue-800'}`}>
+            {offlineUploadResult}
+          </div>
+        )}
+      </div>
 
       {/* 수불부 테이블 */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
