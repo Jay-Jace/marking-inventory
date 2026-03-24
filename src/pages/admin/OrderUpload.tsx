@@ -40,6 +40,11 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   const [cancelTarget, setCancelTarget] = useState<{ orderNumber: string; deliveryNumber: string | null; items: OnlineOrder[] } | null>(null);
   const [cancelling, setCancelling] = useState(false);
 
+  // 등록일 기준 삭제
+  const [deleteDate, setDeleteDate] = useState('');
+  const [deletePreview, setDeletePreview] = useState<{ date: string; count: number } | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
   // ── 대시보드 로딩 ──
   const loadDashboard = useCallback(async () => {
     setDashLoading(true);
@@ -284,6 +289,54 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     }
   };
 
+  // ── 등록일 기준 삭제 ──
+  const handleDeleteByDate = async () => {
+    if (!deleteDate) return;
+    const { count: cnt, error } = await supabaseAdmin
+      .from('online_order')
+      .select('*', { count: 'exact', head: true })
+      .gte('created_at', `${deleteDate}T00:00:00`)
+      .lt('created_at', `${deleteDate}T23:59:59.999`);
+    if (error) { setMessage({ type: 'error', text: error.message }); return; }
+    setDeletePreview({ date: deleteDate, count: cnt || 0 });
+  };
+
+  const confirmDeleteByDate = async () => {
+    if (!deletePreview) return;
+    setDeleting(true);
+    try {
+      // 1000건씩 반복 삭제
+      let totalDeleted = 0;
+      while (true) {
+        const { data } = await supabaseAdmin
+          .from('online_order')
+          .delete()
+          .gte('created_at', `${deletePreview.date}T00:00:00`)
+          .lt('created_at', `${deletePreview.date}T23:59:59.999`)
+          .select('id')
+          .limit(1000);
+        if (!data || data.length === 0) break;
+        totalDeleted += data.length;
+      }
+
+      supabase.from('activity_log').insert({
+        user_id: currentUserId,
+        action_type: 'order_delete',
+        action_date: new Date().toISOString().split('T')[0],
+        summary: { date: deletePreview.date, deleted: totalDeleted },
+      }).then(() => {});
+
+      setMessage({ type: 'success', text: `${deletePreview.date} 등록분 ${totalDeleted}건 삭제 완료` });
+      setDeletePreview(null);
+      setDeleteDate('');
+      loadDashboard();
+    } catch (err: any) {
+      setMessage({ type: 'error', text: `삭제 실패: ${err.message}` });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   // ── 상태 색상 ──
   const statusColor: Record<string, string> = {
     '신규': 'bg-blue-50 text-blue-700',
@@ -453,10 +506,46 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
 
       {/* ── 대시보드 ── */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
-        <h2 className="font-semibold text-gray-900 mb-4 flex items-center gap-2">
-          <Package size={18} /> 주문 현황
-          <span className="text-sm font-normal text-gray-400 ml-1">{totalCount.toLocaleString()}건</span>
-        </h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="font-semibold text-gray-900 flex items-center gap-2">
+            <Package size={18} /> 주문 현황
+            <span className="text-sm font-normal text-gray-400 ml-1">{totalCount.toLocaleString()}건</span>
+          </h2>
+          <div className="flex items-center gap-2">
+            <input
+              type="date"
+              value={deleteDate}
+              onChange={(e) => { setDeleteDate(e.target.value); setDeletePreview(null); }}
+              className="border border-gray-200 rounded-lg px-2 py-1.5 text-xs"
+            />
+            <button
+              onClick={handleDeleteByDate}
+              disabled={!deleteDate}
+              className="px-3 py-1.5 bg-red-50 text-red-600 border border-red-200 rounded-lg text-xs hover:bg-red-100 disabled:opacity-40"
+            >
+              등록일 삭제
+            </button>
+          </div>
+        </div>
+
+        {/* 등록일 삭제 확인 */}
+        {deletePreview && (
+          <div className="mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-xl flex items-center justify-between">
+            <span className="text-sm text-red-800">
+              {deletePreview.date} 등록분 <strong>{deletePreview.count}건</strong> 삭제하시겠습니까?
+            </span>
+            <div className="flex gap-2">
+              <button onClick={confirmDeleteByDate} disabled={deleting || deletePreview.count === 0}
+                className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs hover:bg-red-700 disabled:bg-gray-300">
+                {deleting ? '삭제 중...' : '삭제 확인'}
+              </button>
+              <button onClick={() => setDeletePreview(null)}
+                className="px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg text-xs hover:bg-gray-200">
+                취소
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 상태별 카드 */}
         <div className="grid grid-cols-3 sm:grid-cols-7 gap-2 mb-4">
