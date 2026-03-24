@@ -1,183 +1,158 @@
 import * as XLSX from 'xlsx';
-import type { TxType } from '../types';
 
 export interface OfflineStockTransaction {
   barcode: string;
   skuName: string;
   date: string;       // YYYY-MM-DD
   quantity: number;
-  type: TxType;       // 기초재고 | 입고 | 판매 | 재고조정
+  txType: '입고' | '판매' | '출고';  // DB tx_type에 맞춤
+  memo: string;
 }
 
 export interface OfflineStockParseResult {
   transactions: OfflineStockTransaction[];
   dateRange: { min: string; max: string };
   productCount: number;
-  summary: Record<string, number>; // type별 건수
+  summary: Record<string, number>;
 }
 
 /**
- * 매장수불 스프레드시트 헤더 구조:
- * Row 1: (빈) (빈) 3-16 3-16 3-16 3-16 3-16 3-16 3-17 3-17 ...
- * Row 2: 바코드 품목 기초 입고 출고 이동출고 조정 마감 기초 입고 ...
- * Row 3: (합계)
- * Row 4+: 데이터 (바코드, 품목명, 수량들...)
- *
- * 날짜별 컬럼 패턴 (6컬럼 반복): 기초/입고/출고/이동출고/조정/마감
- * - 기초: 최초 날짜만 기초재고로 사용
- * - 입고: tx_type='입고'
- * - 출고: tx_type='판매' (매장 판매)
- * - 이동출고: skip (이미 system으로 기록됨)
- * - 조정: tx_type='재고조정'
- * - 마감: skip (계산값)
+ * Excel 시리얼 번호 → YYYY-MM-DD
  */
-
-// 날짜별 컬럼 유형
-const COL_TYPES = ['기초', '입고', '출고', '이동출고', '조정', '마감'] as const;
-
-/**
- * 헤더 날짜 파싱 — Excel 시리얼 번호 또는 "3-16" 문자열 모두 지원
- * Excel 시리얼: 46097 = 2026-03-16 (epoch: 1900-01-00 기준)
- */
-function parseDateHeader(val: any): string | null {
-  if (val === '' || val == null) return null;
-
-  // 숫자(Excel 시리얼 번호) — XLSX 내장 파서 사용
-  if (typeof val === 'number' && val > 40000 && val < 60000) {
-    const parsed = XLSX.SSF.parse_date_code(val);
-    const mm = String(parsed.m).padStart(2, '0');
-    const dd = String(parsed.d).padStart(2, '0');
-    return `${parsed.y}-${mm}-${dd}`;
+function serialToDate(val: any): string | null {
+  const num = typeof val === 'number' ? val : Number(val);
+  if (!isNaN(num) && num > 40000 && num < 60000) {
+    const adj = num > 60 ? num - 1 : num;
+    const ms = Date.UTC(1900, 0, 1) + (adj - 1) * 86400000;
+    const d = new Date(ms);
+    const yyyy = d.getUTCFullYear();
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
   }
-
-  // "3-16" 문자열 패턴
-  const s = String(val).trim();
-  const m = s.match(/^(\d{1,2})-(\d{1,2})$/);
-  if (m) {
-    const month = m[1].padStart(2, '0');
-    const day = m[2].padStart(2, '0');
-    return `2026-${month}-${day}`;
-  }
-
+  // YYYY-MM-DD 문자열 그대로 반환
+  const s = String(val || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
   return null;
 }
 
-export function parseOfflineStockExcel(wb: XLSX.WorkBook): OfflineStockParseResult {
-  const sheetName = wb.SheetNames[0];
-  const ws = wb.Sheets[sheetName];
+/**
+ * 판매 탭 파싱
+ * 컬럼: A=날짜, B=품목, C=상품코드, D=바코드, E=상품명, F=수량, G~I=금액, J=비고
+ */
+function parseSalesSheet(ws: XLSX.WorkSheet): OfflineStockTransaction[] {
   const raw: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  const txns: OfflineStockTransaction[] = [];
 
-  if (raw.length < 4) {
-    throw new Error('데이터가 부족합니다. 최소 4행(헤더 2행 + 합계 + 데이터 1행) 필요합니다.');
+  for (let i = 1; i < raw.length; i++) {
+    const row = raw[i];
+    // 합계 행, 품목 헤더 반복 행 skip
+    if (row[1] === '합계' || row[1] === '품목' || row[4] === '상품명') continue;
+
+    const date = serialToDate(row[0]);
+    const barcode = String(row[3] || '').trim();
+    const skuName = String(row[4] || '').trim();
+    const qty = Number(row[5]) || 0;
+
+    if (!date || !barcode || barcode.length < 5 || qty <= 0) continue;
+
+    txns.push({
+      barcode, skuName, date, quantity: qty,
+      txType: '판매', memo: '매장 판매',
+    });
+  }
+  return txns;
+}
+
+/**
+ * 입고 탭 파싱
+ * 컬럼: A=입고일, B=바코드, C=상품명, D=수량, E=입고구분
+ */
+function parseReceiptSheet(ws: XLSX.WorkSheet): OfflineStockTransaction[] {
+  const raw: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+  const txns: OfflineStockTransaction[] = [];
+
+  for (let i = 1; i < raw.length; i++) {
+    const row = raw[i];
+    const date = serialToDate(row[0]);
+    const barcode = String(row[1] || '').trim();
+    const skuName = String(row[2] || '').trim();
+    const qty = Number(row[3]) || 0;
+    const reason = String(row[4] || '입고').trim();
+
+    if (!date || !barcode || barcode.length < 5 || qty <= 0) continue;
+
+    txns.push({
+      barcode, skuName, date, quantity: qty,
+      txType: '입고', memo: `매장 입고 (${reason})`,
+    });
+  }
+  return txns;
+}
+
+/**
+ * 오프라인 매장 판매/입고 엑셀 파싱
+ * 워크북에 '판매' 또는 '입고' 시트가 있으면 해당 시트 파싱
+ * 없으면 첫 번째 시트를 자동 감지 (헤더로 판별)
+ */
+export function parseOfflineStockExcel(wb: XLSX.WorkBook): OfflineStockParseResult {
+  const allTxns: OfflineStockTransaction[] = [];
+
+  // 시트명으로 직접 찾기
+  const salesSheet = wb.Sheets['판매'];
+  const receiptSheet = wb.Sheets['입고'];
+
+  if (salesSheet) {
+    allTxns.push(...parseSalesSheet(salesSheet));
+  }
+  if (receiptSheet) {
+    allTxns.push(...parseReceiptSheet(receiptSheet));
   }
 
-  const row1 = raw[0]; // 날짜 행
-  const row2 = raw[1]; // 유형 행 (기초/입고/출고/이동출고/조정/마감)
+  // 명시적 시트가 없으면 첫 번째 시트의 헤더로 판별
+  if (!salesSheet && !receiptSheet) {
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const raw: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+    if (raw.length < 2) throw new Error('데이터가 부족합니다.');
 
-  // 날짜-컬럼 매핑 구축
-  interface DateCol {
-    date: string;
-    colIndex: number;
-    colType: string; // 기초|입고|출고|이동출고|조정|마감
-  }
+    const headers = raw[0].map((h: any) => String(h).trim());
 
-  const dateCols: DateCol[] = [];
-  let currentDate = '';
-
-  for (let c = 2; c < row1.length; c++) {
-    const dateVal = parseDateHeader(String(row1[c] || ''));
-    if (dateVal) currentDate = dateVal;
-    if (!currentDate) continue;
-
-    const typeVal = String(row2[c] || '').trim();
-    if (COL_TYPES.includes(typeVal as any)) {
-      dateCols.push({ date: currentDate, colIndex: c, colType: typeVal });
-    }
-  }
-
-  if (dateCols.length === 0) {
-    throw new Error('날짜/유형 헤더를 찾을 수 없습니다. 1행에 "3-16" 형식, 2행에 "기초/입고/출고/이동출고/조정/마감"이 있어야 합니다.');
-  }
-
-  // 최초 날짜 (기초재고용)
-  const allDates = [...new Set(dateCols.map((d) => d.date))].sort();
-  const firstDate = allDates[0];
-
-  // 데이터 행 파싱 (4행부터 = index 3)
-  const transactions: OfflineStockTransaction[] = [];
-  const barcodes = new Set<string>();
-
-  for (let r = 3; r < raw.length; r++) {
-    const row = raw[r];
-    const barcode = String(row[0] || '').trim();
-    const skuName = String(row[1] || '').trim();
-
-    if (!barcode || barcode === '바코드' || barcode === '0') continue; // 빈 행 또는 헤더 반복 skip
-
-    barcodes.add(barcode);
-
-    for (const dc of dateCols) {
-      const val = Number(row[dc.colIndex]) || 0;
-      if (val === 0) continue; // 0이면 skip
-
-      switch (dc.colType) {
-        case '기초':
-          // 최초 날짜의 기초만 넣음
-          if (dc.date === firstDate && val > 0) {
-            transactions.push({
-              barcode, skuName, date: dc.date,
-              quantity: val, type: '기초재고',
-            });
-          }
-          break;
-        case '입고':
-          if (val > 0) {
-            transactions.push({
-              barcode, skuName, date: dc.date,
-              quantity: val, type: '입고',
-            });
-          }
-          break;
-        case '출고':
-          // 매장 판매
-          if (val > 0) {
-            transactions.push({
-              barcode, skuName, date: dc.date,
-              quantity: val, type: '판매',
-            });
-          }
-          break;
-        case '이동출고':
-          // skip — 이미 system으로 기록됨
-          break;
-        case '조정':
-          // 양수/음수 모두 가능
-          transactions.push({
-            barcode, skuName, date: dc.date,
-            quantity: val, type: '재고조정',
-          });
-          break;
-        case '마감':
-          // skip — 계산값
-          break;
+    // 판매 양식 감지: 바코드(D) + 수량(F) + 총매출액 등
+    if (headers.includes('바코드') || headers.includes('상품명')) {
+      // 바코드 위치로 판별
+      const bcIdx = headers.indexOf('바코드');
+      if (bcIdx >= 0 && headers.includes('수량')) {
+        allTxns.push(...parseSalesSheet(ws));
       }
     }
+
+    // 입고 양식 감지: 입고일 + 바코드 + 수량
+    if (headers.includes('입고일') || (headers[0] === '입고일')) {
+      allTxns.push(...parseReceiptSheet(ws));
+    }
+  }
+
+  if (allTxns.length === 0) {
+    throw new Error(
+      '파싱 가능한 데이터를 찾을 수 없습니다.\n' +
+      '"판매" 시트(날짜/바코드/상품명/수량) 또는\n' +
+      '"입고" 시트(입고일/바코드/상품명/수량/입고구분)가 필요합니다.'
+    );
   }
 
   // 요약
   const summary: Record<string, number> = {};
-  for (const tx of transactions) {
-    summary[tx.type] = (summary[tx.type] || 0) + 1;
+  const barcodes = new Set<string>();
+  for (const tx of allTxns) {
+    summary[tx.txType] = (summary[tx.txType] || 0) + 1;
+    barcodes.add(tx.barcode);
   }
 
-  const txDates = transactions.map((t) => t.date).sort();
+  const dates = allTxns.map((t) => t.date).sort();
 
   return {
-    transactions,
-    dateRange: {
-      min: txDates[0] || firstDate,
-      max: txDates[txDates.length - 1] || allDates[allDates.length - 1],
-    },
+    transactions: allTxns,
+    dateRange: { min: dates[0], max: dates[dates.length - 1] },
     productCount: barcodes.size,
     summary,
   };

@@ -492,7 +492,7 @@ export default function StockLedger() {
             skuName: sku.skuName,
             date: tx.date,
             quantity: tx.quantity,
-            type: tx.type,
+            type: tx.txType,
           });
         } else {
           unmatchedSet.set(tx.barcode, tx.skuName);
@@ -529,9 +529,9 @@ export default function StockLedger() {
         positive.map((t) => ({
           warehouseId: offWhId,
           skuId: t.skuId,
-          txType: t.type,
+          txType: t.type as any,
           quantity: t.quantity,
-          source: 'pos_excel' as const,
+          source: 'offline_manual' as const,
           txDate: t.date,
           memo: `매장수불:${t.date}:${t.type}`,
         })),
@@ -548,9 +548,9 @@ export default function StockLedger() {
       await recordTransaction({
         warehouseId: offWhId,
         skuId: t.skuId,
-        txType: t.type,
+        txType: t.type as any,
         quantity: t.quantity,
-        source: 'pos_excel',
+        source: 'offline_manual',
         txDate: t.date,
         memo: `매장수불:${t.date}:${t.type}`,
       });
