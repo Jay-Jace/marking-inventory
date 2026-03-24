@@ -77,7 +77,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     if (statusFilter !== '전체' && o.status !== statusFilter) return false;
     if (searchText) {
       const q = searchText.toLowerCase();
-      return o.order_number.includes(q) || (o.sku_id || '').toLowerCase().includes(q) || (o.sku_name || '').toLowerCase().includes(q);
+      return o.order_number.includes(q) || (o.delivery_number || '').includes(q) || (o.sku_id || '').toLowerCase().includes(q) || (o.sku_name || '').toLowerCase().includes(q) || (o.option_text || '').toLowerCase().includes(q);
     }
     return true;
   });
@@ -94,13 +94,15 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       const wb = XLSX.read(buf);
       const result = parseOrderExcel(wb);
 
-      setParsed(result.orders);
-      setParseSummary(result.summary);
+      // 유니폼/마킹만 필터 (액세서리/의류 제외)
+      const uniformOnly = result.orders.filter(o => o.needsOfflineShipment);
+      setParsed(uniformOnly);
+      setParseSummary({ ...result.summary, total: uniformOnly.length, noMarking: uniformOnly.filter(o => !o.needsMarking).length });
 
       // 기존 주문 중복 체크
       const existingSet = new Set(orders.map(o => `${o.order_number}|${o.sku_id}`));
-      const newOnes = result.orders.filter(o => !existingSet.has(`${o.orderNumber}|${o.skuId}`));
-      const dups = result.orders.length - newOnes.length;
+      const newOnes = uniformOnly.filter(o => !existingSet.has(`${o.orderNumber}|${o.skuId}`));
+      const dups = uniformOnly.length - newOnes.length;
       setNewOrders(newOnes);
       setDupCount(dups);
 
@@ -438,7 +440,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
           <input
             type="text"
-            placeholder="주문번호 / SKU / 상품명 검색"
+            placeholder="주문번호 / 배송번호 / SKU / 상품명 / 옵션 검색"
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}
             className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none"
@@ -451,6 +453,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             <thead>
               <tr className="bg-gray-50 border-b">
                 <th className="px-2 py-2 text-left">주문번호</th>
+                <th className="px-2 py-2 text-left">배송번호</th>
                 <th className="px-2 py-2 text-left">SKU</th>
                 <th className="px-2 py-2 text-left">상품명</th>
                 <th className="px-2 py-2 text-left">옵션</th>
@@ -461,15 +464,16 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             </thead>
             <tbody>
               {dashLoading ? (
-                <tr><td colSpan={7} className="px-4 py-12 text-center text-gray-400">불러오는 중...</td></tr>
+                <tr><td colSpan={8} className="px-4 py-12 text-center text-gray-400">불러오는 중...</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={7} className="px-4 py-12 text-center text-gray-400">
+                <tr><td colSpan={8} className="px-4 py-12 text-center text-gray-400">
                   {totalCount === 0 ? '등록된 주문이 없습니다. 엑셀을 업로드하세요.' : '검색 결과가 없습니다.'}
                 </td></tr>
               ) : (
                 filtered.slice(0, 200).map(o => (
                   <tr key={o.id} className="border-t border-gray-50 hover:bg-gray-50">
                     <td className="px-2 py-1.5 font-mono text-xs text-gray-600">{o.order_number}</td>
+                    <td className="px-2 py-1.5 font-mono text-xs text-gray-400">{o.delivery_number}</td>
                     <td className="px-2 py-1.5 font-mono text-xs text-gray-500">{o.sku_id}</td>
                     <td className="px-2 py-1.5 text-gray-900 max-w-[200px] truncate">{o.sku_name}</td>
                     <td className="px-2 py-1.5 text-xs text-gray-500">{o.option_text}</td>
