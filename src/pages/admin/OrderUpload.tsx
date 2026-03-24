@@ -45,6 +45,10 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   const [deletePreview, setDeletePreview] = useState<{ date: string; count: number } | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  // 작업지시서 생성
+  const [creatingWo, setCreatingWo] = useState(false);
+  const [woResult, setWoResult] = useState<string | null>(null);
+
   // ── 대시보드 로딩 ──
   const loadDashboard = useCallback(async () => {
     setDashLoading(true);
@@ -337,6 +341,97 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     }
   };
 
+  // ── 작업지시서 생성 (신규 주문 → work_order) ──
+  const handleCreateWorkOrder = async () => {
+    // 신규 + work_order_id 없는 주문만 대상
+    const eligible = orders.filter(o => o.status === '신규' && !o.work_order_id);
+    if (eligible.length === 0) {
+      setMessage({ type: 'error', text: '작업지시서를 생성할 신규 주문이 없습니다.' });
+      return;
+    }
+
+    const ok = window.confirm(
+      `신규 주문 ${eligible.length}건으로 작업지시서를 생성합니다.\n\n` +
+      `SKU ${[...new Set(eligible.map(o => o.sku_id))].length}종, ` +
+      `총 수량 ${eligible.reduce((s, o) => s + o.quantity, 0)}개\n\n진행하시겠습니까?`
+    );
+    if (!ok) return;
+
+    setCreatingWo(true);
+    setWoResult(null);
+    try {
+      const today = new Date().toISOString().split('T')[0];
+
+      // 1. work_order 생성
+      const { data: wo, error: woErr } = await supabaseAdmin
+        .from('work_order')
+        .insert({ download_date: today, status: '이관준비' })
+        .select('id')
+        .single();
+      if (woErr || !wo) throw woErr || new Error('작업지시서 생성 실패');
+      const woId = wo.id;
+
+      // 2. SKU별 수량 합산 → work_order_line 생성
+      const skuMap: Record<string, { qty: number; needsMarking: boolean; skuName: string }> = {};
+      for (const o of eligible) {
+        if (!skuMap[o.sku_id]) skuMap[o.sku_id] = { qty: 0, needsMarking: o.needs_marking, skuName: o.sku_name || '' };
+        skuMap[o.sku_id].qty += o.quantity;
+      }
+
+      // SKU 등록 확인 + 자동 등록
+      const skuIds = Object.keys(skuMap);
+      for (let i = 0; i < skuIds.length; i += 100) {
+        const batch = skuIds.slice(i, i + 100).map(skuId => ({
+          sku_id: skuId,
+          sku_name: skuMap[skuId].skuName || skuId,
+          type: '완제품',
+        }));
+        await supabaseAdmin.from('sku').upsert(batch, { onConflict: 'sku_id', ignoreDuplicates: true });
+      }
+
+      // work_order_line 삽입
+      const lines = Object.entries(skuMap).map(([skuId, v]) => ({
+        work_order_id: woId,
+        finished_sku_id: skuId,
+        ordered_qty: v.qty,
+        sent_qty: 0,
+        received_qty: 0,
+        marked_qty: 0,
+        needs_marking: v.needsMarking,
+      }));
+      for (let i = 0; i < lines.length; i += 100) {
+        const { error } = await supabaseAdmin.from('work_order_line').insert(lines.slice(i, i + 100));
+        if (error) throw error;
+      }
+
+      // 3. online_order 업데이트: work_order_id 연결 + 상태 발송대기
+      const orderIds = eligible.map(o => o.id);
+      for (let i = 0; i < orderIds.length; i += 100) {
+        await supabaseAdmin
+          .from('online_order')
+          .update({ work_order_id: woId, status: '발송대기' })
+          .in('id', orderIds.slice(i, i + 100));
+      }
+
+      // activity_log
+      supabase.from('activity_log').insert({
+        user_id: currentUserId,
+        action_type: 'work_order_create',
+        work_order_id: woId,
+        action_date: today,
+        summary: { lines: lines.length, orders: eligible.length, totalQty: eligible.reduce((s, o) => s + o.quantity, 0) },
+      }).then(() => {});
+
+      setWoResult(`작업지시서 생성 완료! ${lines.length}종 ${eligible.reduce((s, o) => s + o.quantity, 0)}개 (주문 ${eligible.length}건 연결)`);
+      setMessage({ type: 'success', text: `작업지시서 생성 완료 — 오프라인 매장 발송 화면에서 확인하세요` });
+      loadDashboard();
+    } catch (err: any) {
+      setMessage({ type: 'error', text: `작업지시서 생성 실패: ${err.message}` });
+    } finally {
+      setCreatingWo(false);
+    }
+  };
+
   // ── 상태 색상 ──
   const statusColor: Record<string, string> = {
     '신규': 'bg-blue-50 text-blue-700',
@@ -512,6 +607,13 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             <span className="text-sm font-normal text-gray-400 ml-1">{totalCount.toLocaleString()}건</span>
           </h2>
           <div className="flex items-center gap-2">
+            <button
+              onClick={handleCreateWorkOrder}
+              disabled={creatingWo || orders.filter(o => o.status === '신규' && !o.work_order_id).length === 0}
+              className="px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-semibold hover:bg-indigo-700 disabled:bg-gray-300"
+            >
+              {creatingWo ? '생성 중...' : `작업지시서 생성 (${orders.filter(o => o.status === '신규' && !o.work_order_id).length}건)`}
+            </button>
             <input
               type="date"
               value={deleteDate}
@@ -527,6 +629,14 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             </button>
           </div>
         </div>
+
+        {/* 작업지시서 생성 결과 */}
+        {woResult && (
+          <div className="mb-4 px-4 py-3 bg-indigo-50 border border-indigo-200 rounded-xl text-sm text-indigo-800 flex items-center justify-between">
+            <span>{woResult}</span>
+            <button onClick={() => setWoResult(null)} className="text-indigo-400 hover:text-indigo-600"><X size={14} /></button>
+          </div>
+        )}
 
         {/* 등록일 삭제 확인 */}
         {deletePreview && (

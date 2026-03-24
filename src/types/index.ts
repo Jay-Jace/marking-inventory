@@ -96,6 +96,7 @@ export interface OnlineOrder {
   quantity: number;
   needs_marking: boolean;
   status: OnlineOrderStatus;
+  work_order_id: string | null;
   created_at: string;
 }
 
