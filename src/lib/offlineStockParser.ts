@@ -54,11 +54,12 @@ function parseSalesSheet(ws: XLSX.WorkSheet): OfflineStockTransaction[] {
     const skuName = String(row[4] || '').trim();
     const qty = Number(row[5]) || 0;
 
-    if (!date || !barcode || barcode.length < 5 || qty <= 0) continue;
+    if (!date || !barcode || barcode.length < 5 || qty === 0) continue;
 
     txns.push({
       barcode, skuName, date, quantity: qty,
-      txType: '판매', memo: '매장 판매',
+      txType: '판매',
+      memo: qty < 0 ? '매장 환불' : '매장 판매',
     });
   }
   return txns;
