@@ -751,13 +751,58 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
   }
 
   const hasDiscrepancy = items.some((item) => item.actualQty !== item.expectedQty);
-  const totalUniformQty = items.filter((i) => !i.isMarking).reduce((s, i) => s + i.expectedQty, 0);
-  const totalMarkingQty = items.filter((i) => i.isMarking).reduce((s, i) => s + i.expectedQty, 0);
-  const totalReceiptQty = totalUniformQty + totalMarkingQty;
 
-  // 마킹 작업 예정 vs 단품 출고 분류
-  const markingWorkItems = items.filter((i) => i.needsMarking);
-  const directShipItems = items.filter((i) => !i.needsMarking);
+  // 4개 분류: 마킹작업예정(유니폼/마킹) + 단순출고(유니폼/마킹)
+  const markingUniform = items.filter((i) => i.needsMarking && !i.isMarking);
+  const markingMarking = items.filter((i) => i.needsMarking && i.isMarking);
+  const directUniform = items.filter((i) => !i.needsMarking && !i.isMarking);
+  const directMarking = items.filter((i) => !i.needsMarking && i.isMarking);
+
+  const markingUniformQty = markingUniform.reduce((s, i) => s + i.expectedQty, 0);
+  const markingMarkingQty = markingMarking.reduce((s, i) => s + i.expectedQty, 0);
+  const directUniformQty = directUniform.reduce((s, i) => s + i.expectedQty, 0);
+  const directMarkingQty = directMarking.reduce((s, i) => s + i.expectedQty, 0);
+  const totalReceiptQty = markingUniformQty + markingMarkingQty + directUniformQty + directMarkingQty;
+
+  // 카드 렌더링 헬퍼
+  const renderReceiptCard = (item: typeof items[0], ringColor: string) => (
+    <div key={item.skuId} className="px-3 py-3">
+      <p className="text-xs font-medium text-gray-800 leading-tight truncate">{item.skuName}</p>
+      <p className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">{item.skuId}</p>
+      <div className="flex items-center justify-between mt-1.5 gap-1">
+        <p className="text-[10px] text-gray-400">예정 {item.expectedQty}개</p>
+        <div className="flex flex-col items-end gap-0.5">
+          <div className="flex items-center gap-0.5">
+            <input
+              type="number"
+              min="0"
+              value={item.actualQty}
+              onChange={(e) => handleActualChange(item.skuId, Number(e.target.value))}
+              className={`w-16 border rounded-lg px-1.5 py-1 text-xs text-right focus:outline-none focus:ring-2 ${ringColor} ${
+                item.actualQty > item.expectedQty
+                  ? 'border-orange-300 bg-orange-50'
+                  : item.actualQty < item.expectedQty
+                  ? 'border-red-300 bg-red-50'
+                  : 'border-gray-300'
+              }`}
+            />
+            <span className="text-[10px] text-gray-400">개</span>
+          </div>
+          {item.actualQty !== item.expectedQty && (
+            <span
+              className={`text-[10px] font-medium ${
+                item.actualQty > item.expectedQty ? 'text-orange-600' : 'text-red-600'
+              }`}
+            >
+              {item.actualQty > item.expectedQty
+                ? `+${item.actualQty - item.expectedQty}`
+                : `${item.actualQty - item.expectedQty}`}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="space-y-5 max-w-3xl">
@@ -962,132 +1007,105 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
           <p className="text-xs text-gray-400 mt-0.5">실제 입고된 수량을 입력하세요</p>
         </div>
 
-        {/* 총 수량 합계 */}
+        {/* 총 수량 합계 — 5개 구분 */}
         <div className="px-5 py-3 bg-blue-50/60 border-b border-gray-100 space-y-1">
-          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
+          <div className="flex items-center justify-between text-xs">
             <span className="font-semibold text-indigo-700">마킹 작업 예정</span>
-            <span>{markingWorkItems.reduce((s, i) => s + i.expectedQty, 0)}개 ({markingWorkItems.length}종)</span>
+            <span className="text-gray-600 font-medium">{markingUniformQty + markingMarkingQty}개</span>
           </div>
-          <div className="flex items-center justify-between text-xs text-gray-500 mb-1">
-            <span className="font-semibold text-teal-700">단품 출고 (마킹 불필요)</span>
-            <span>{directShipItems.reduce((s, i) => s + i.expectedQty, 0)}개 ({directShipItems.length}종)</span>
+          <div className="flex items-center justify-between text-xs pl-3">
+            <span className="text-blue-700">유니폼</span>
+            <span className="text-blue-800">{markingUniformQty}개</span>
+          </div>
+          <div className="flex items-center justify-between text-xs pl-3">
+            <span className="text-purple-700">마킹</span>
+            <span className="text-purple-800">{markingMarkingQty}개</span>
+          </div>
+          <div className="flex items-center justify-between text-xs mt-1">
+            <span className="font-semibold text-gray-600">단순 출고</span>
+            <span className="text-gray-600 font-medium">{directUniformQty + directMarkingQty}개</span>
+          </div>
+          <div className="flex items-center justify-between text-xs pl-3">
+            <span className="text-teal-700">유니폼</span>
+            <span className="text-teal-800">{directUniformQty}개</span>
+          </div>
+          <div className="flex items-center justify-between text-xs pl-3">
+            <span className="text-orange-700">마킹</span>
+            <span className="text-orange-800">{directMarkingQty}개</span>
           </div>
           <div className="border-t border-blue-200 pt-1 mt-1 flex items-center justify-between text-sm">
-            <span className="font-bold text-gray-800">총 입고 수량</span>
+            <span className="font-bold text-gray-800">총 입고 수량 ({items.length}종)</span>
             <span className="font-bold text-gray-900 text-base">{totalReceiptQty}개</span>
           </div>
         </div>
 
-        {/* 2컬럼 헤더 */}
-        <div className="grid grid-cols-2 border-b border-gray-100">
-          <div className="px-4 py-2.5 border-r border-gray-100 bg-blue-50">
-            <p className="text-xs font-semibold text-blue-700">
-              유니폼 단품{' '}
-              <span className="font-normal text-blue-500">
-                ({items.filter((i) => !i.isMarking).length}종)
-              </span>
-            </p>
-          </div>
-          <div className="px-4 py-2.5 bg-purple-50">
-            <p className="text-xs font-semibold text-purple-700">
-              마킹 단품{' '}
-              <span className="font-normal text-purple-500">
-                ({items.filter((i) => i.isMarking).length}종)
-              </span>
-            </p>
-          </div>
-        </div>
+        {/* 섹션 1: 마킹 작업 예정 */}
+        {(markingUniform.length > 0 || markingMarking.length > 0) && (
+          <>
+            <div className="px-4 py-2 bg-indigo-50 border-b border-gray-100">
+              <p className="text-xs font-semibold text-indigo-700">
+                마킹 작업 예정{' '}
+                <span className="font-normal text-indigo-500">
+                  ({markingUniform.length + markingMarking.length}종 / {markingUniformQty + markingMarkingQty}개)
+                </span>
+              </p>
+            </div>
+            <div className="grid grid-cols-2 border-b border-gray-100">
+              <div className="px-4 py-2 border-r border-gray-100 bg-blue-50">
+                <p className="text-xs font-semibold text-blue-700">
+                  유니폼 <span className="font-normal text-blue-500">({markingUniform.length}종)</span>
+                </p>
+              </div>
+              <div className="px-4 py-2 bg-purple-50">
+                <p className="text-xs font-semibold text-purple-700">
+                  마킹 <span className="font-normal text-purple-500">({markingMarking.length}종)</span>
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 border-b border-gray-200">
+              <div className="border-r border-gray-100 divide-y divide-gray-50">
+                {markingUniform.map((item) => renderReceiptCard(item, 'focus:ring-blue-500'))}
+              </div>
+              <div className="divide-y divide-gray-50">
+                {markingMarking.map((item) => renderReceiptCard(item, 'focus:ring-purple-500'))}
+              </div>
+            </div>
+          </>
+        )}
 
-        {/* 2컬럼 아이템 목록 */}
-        <div className="grid grid-cols-2">
-          {/* 왼쪽: 유니폼 */}
-          <div className="border-r border-gray-100 divide-y divide-gray-50">
-            {items
-              .filter((item) => !item.isMarking)
-              .map((item) => (
-                <div key={item.skuId} className="px-3 py-3">
-                  <p className="text-xs font-medium text-gray-800 leading-tight truncate">{item.skuName}</p>
-                  <p className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">{item.skuId}</p>
-                  <div className="flex items-center justify-between mt-1.5 gap-1">
-                    <p className="text-[10px] text-gray-400">예정 {item.expectedQty}개</p>
-                    <div className="flex flex-col items-end gap-0.5">
-                      <div className="flex items-center gap-0.5">
-                        <input
-                          type="number"
-                          min="0"
-                          value={item.actualQty}
-                          onChange={(e) => handleActualChange(item.skuId, Number(e.target.value))}
-                          className={`w-16 border rounded-lg px-1.5 py-1 text-xs text-right focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-                            item.actualQty > item.expectedQty
-                              ? 'border-orange-300 bg-orange-50'
-                              : item.actualQty < item.expectedQty
-                              ? 'border-red-300 bg-red-50'
-                              : 'border-gray-300'
-                          }`}
-                        />
-                        <span className="text-[10px] text-gray-400">개</span>
-                      </div>
-                      {item.actualQty !== item.expectedQty && (
-                        <span
-                          className={`text-[10px] font-medium ${
-                            item.actualQty > item.expectedQty ? 'text-orange-600' : 'text-red-600'
-                          }`}
-                        >
-                          {item.actualQty > item.expectedQty
-                            ? `+${item.actualQty - item.expectedQty}`
-                            : `${item.actualQty - item.expectedQty}`}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-          </div>
-
-          {/* 오른쪽: 마킹 */}
-          <div className="divide-y divide-gray-50">
-            {items
-              .filter((item) => item.isMarking)
-              .map((item) => (
-                <div key={item.skuId} className="px-3 py-3">
-                  <p className="text-xs font-medium text-gray-800 leading-tight truncate">{item.skuName}</p>
-                  <p className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">{item.skuId}</p>
-                  <div className="flex items-center justify-between mt-1.5 gap-1">
-                    <p className="text-[10px] text-gray-400">예정 {item.expectedQty}개</p>
-                    <div className="flex flex-col items-end gap-0.5">
-                      <div className="flex items-center gap-0.5">
-                        <input
-                          type="number"
-                          min="0"
-                          value={item.actualQty}
-                          onChange={(e) => handleActualChange(item.skuId, Number(e.target.value))}
-                          className={`w-16 border rounded-lg px-1.5 py-1 text-xs text-right focus:outline-none focus:ring-2 focus:ring-purple-500 ${
-                            item.actualQty > item.expectedQty
-                              ? 'border-orange-300 bg-orange-50'
-                              : item.actualQty < item.expectedQty
-                              ? 'border-red-300 bg-red-50'
-                              : 'border-gray-300'
-                          }`}
-                        />
-                        <span className="text-[10px] text-gray-400">개</span>
-                      </div>
-                      {item.actualQty !== item.expectedQty && (
-                        <span
-                          className={`text-[10px] font-medium ${
-                            item.actualQty > item.expectedQty ? 'text-orange-600' : 'text-red-600'
-                          }`}
-                        >
-                          {item.actualQty > item.expectedQty
-                            ? `+${item.actualQty - item.expectedQty}`
-                            : `${item.actualQty - item.expectedQty}`}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-          </div>
-        </div>
+        {/* 섹션 2: 단순 출고 */}
+        {(directUniform.length > 0 || directMarking.length > 0) && (
+          <>
+            <div className="px-4 py-2 bg-gray-50 border-b border-gray-100">
+              <p className="text-xs font-semibold text-gray-600">
+                단순 출고 — 마킹 없음{' '}
+                <span className="font-normal text-gray-400">
+                  ({directUniform.length + directMarking.length}종 / {directUniformQty + directMarkingQty}개)
+                </span>
+              </p>
+            </div>
+            <div className="grid grid-cols-2 border-b border-gray-100">
+              <div className="px-4 py-2 border-r border-gray-100 bg-teal-50">
+                <p className="text-xs font-semibold text-teal-700">
+                  유니폼 <span className="font-normal text-teal-500">({directUniform.length}종)</span>
+                </p>
+              </div>
+              <div className="px-4 py-2 bg-orange-50">
+                <p className="text-xs font-semibold text-orange-700">
+                  마킹 <span className="font-normal text-orange-500">({directMarking.length}종)</span>
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2">
+              <div className="border-r border-gray-100 divide-y divide-gray-50">
+                {directUniform.map((item) => renderReceiptCard(item, 'focus:ring-teal-500'))}
+              </div>
+              <div className="divide-y divide-gray-50">
+                {directMarking.map((item) => renderReceiptCard(item, 'focus:ring-orange-500'))}
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       {hasDiscrepancy && (
