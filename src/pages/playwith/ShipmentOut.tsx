@@ -160,7 +160,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       for (const line of lineList) {
         const qty = line.needs_marking
           ? (markingTotals[line.id] || 0)     // 마킹 완성품: daily_marking 합산
-          : (line.received_qty || 0);         // 단품: 입고확인 수량 (마킹 불필요)
+          : Math.min(line.ordered_qty || 0, line.received_qty || 0); // 단품: 주문 수량 이내로 제한 (received_qty에 마킹 구성품이 합산되는 버그 방지)
 
         if (qty <= 0) continue;
 
