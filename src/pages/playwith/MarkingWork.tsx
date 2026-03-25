@@ -1609,8 +1609,8 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         </div>
       )}
 
-      {/* ── 전체 통합 뷰 아코디언 (오늘이고 orders > 1) ── */}
-      {isToday && orders.length > 1 && (
+      {/* ── 전체 통합 뷰 아코디언 ── */}
+      {isToday && orders.length >= 1 && (
         <div className="bg-white rounded-xl shadow-sm border border-indigo-200 overflow-hidden">
           <button
             onClick={toggleMergedAccordion}
@@ -1767,8 +1767,8 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         </div>
       )}
 
-      {/* ── 날짜별 아코디언 (오늘이고 orders > 1) — 완료된 날짜 제외 ── */}
-      {isToday && orders.length > 1 && orders.map((wo) => {
+      {/* ── 날짜별 아코디언 — 완료된 날짜 제외 ── */}
+      {isToday && orders.length >= 1 && orders.map((wo) => {
         const isExpanded = expandedWoIds.has(wo.id);
         const isLoadingThis = woLoadingId === wo.id;
         const cached = woItemsCache[wo.id];
