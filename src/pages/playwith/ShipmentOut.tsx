@@ -158,9 +158,11 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       // 4. finished_sku_id 수준 집계 (BOM 전개 없음!)
       const itemMap: Record<string, ShipmentOutItem> = {};
       for (const line of lineList) {
-        const qty = line.needs_marking
+        // 마킹키트 단품(26MK-)은 마킹 작업 대상이 아니므로 단순출고처럼 처리
+        const isMarkingKitDirect = line.needs_marking && (line.finished_sku_id as string).startsWith('26MK-');
+        const qty = (line.needs_marking && !isMarkingKitDirect)
           ? (markingTotals[line.id] || 0)     // 마킹 완성품: daily_marking 합산
-          : Math.min(line.ordered_qty || 0, line.received_qty || 0); // 단품: 주문 수량 이내로 제한 (received_qty에 마킹 구성품이 합산되는 버그 방지)
+          : Math.min(line.ordered_qty || 0, line.received_qty || 0); // 단품/마킹키트 단품: 주문 수량 이내로 제한
 
         if (qty <= 0) continue;
 
