@@ -45,6 +45,7 @@ interface ShipmentSource {
 }
 
 interface MergedShipmentItem {
+  mergeKey: string;           // 내부 식별자: `${skuId}::m` 또는 `${skuId}::d`
   skuId: string;
   skuName: string;
   barcode: string | null;
@@ -202,28 +203,39 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         const detail: Record<string, number> = wo.sent_detail || {};
 
         // 구성품 레벨로 전개 후, 재고 있는 것만 잔량 계산
+        // sent_detail 이중 차감 방지: 마킹 BOM에서 소비한 sent 수량 추적
+        const sentConsumed: Record<string, number> = {};
         let totalShippable = 0;
+
+        // 1패스: 마킹 라인 (BOM 전개) — sent_detail 먼저 소비
         for (const l of lines) {
+          if (!l.needs_marking || !bomDetailMap[l.finished_sku_id]) continue;
           const ordQty = l.ordered_qty || 0;
-          if (l.needs_marking && bomDetailMap[l.finished_sku_id]) {
-            // BOM 등록됨 → 각 구성품 재고 체크
-            for (const comp of bomDetailMap[l.finished_sku_id]) {
-              const alreadySent = detail[comp.compSkuId] || 0;
-              const needed = comp.qty * ordQty - alreadySent;
-              const available = offlineInvMap[comp.compSkuId] || 0;
-              totalShippable += Math.max(0, Math.min(needed, available));
-            }
-          } else if (l.needs_marking) {
-            // BOM 미등록 마킹 → selectOrder에서도 표시 안 되므로 skip
-          } else if (isUniformRelated(l.finished_sku_id)) {
-            // 유니폼/마킹키트 단품만 (악세서리 등 비유니폼 제외)
-            const alreadySent = detail[l.finished_sku_id] || 0;
-            const needed = ordQty - alreadySent;
-            const available = offlineInvMap[l.finished_sku_id] || 0;
+          for (const comp of bomDetailMap[l.finished_sku_id]) {
+            const totalSent = detail[comp.compSkuId] || 0;
+            const alreadyConsumed = sentConsumed[comp.compSkuId] || 0;
+            const availableSent = Math.max(0, totalSent - alreadyConsumed);
+            const subtracted = Math.min(comp.qty * ordQty, availableSent);
+            sentConsumed[comp.compSkuId] = alreadyConsumed + subtracted;
+            const needed = comp.qty * ordQty - subtracted;
+            const available = offlineInvMap[comp.compSkuId] || 0;
             totalShippable += Math.max(0, Math.min(needed, available));
           }
-          // 비유니폼 단품 (26AC, 26AP 등)은 오프라인 발송 대상 아님 → skip
         }
+
+        // 2패스: 단순출고 라인 — 남은 sent_detail만 차감
+        for (const l of lines) {
+          if (l.needs_marking) continue;
+          if (!isUniformRelated(l.finished_sku_id)) continue;
+          const ordQty = l.ordered_qty || 0;
+          const totalSent = detail[l.finished_sku_id] || 0;
+          const alreadyConsumed = sentConsumed[l.finished_sku_id] || 0;
+          const subtracted = Math.min(ordQty, Math.max(0, totalSent - alreadyConsumed));
+          const needed = ordQty - subtracted;
+          const available = offlineInvMap[l.finished_sku_id] || 0;
+          totalShippable += Math.max(0, Math.min(needed, available));
+        }
+        // 비유니폼 단품 (26AC, 26AP 등)은 오프라인 발송 대상 아님 → skip
 
         return { id: wo.id, download_date: wo.download_date, status: wo.status, lineCount, remainingQty: totalShippable };
       };
@@ -343,11 +355,12 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       const sentDetail: Record<string, number> = (woSentData as any)?.sent_detail || {};
 
       // 1차: 전체 주문 수량으로 componentMap 빌드
+      // 마킹용과 단순출고용을 분리 키(::m / ::d)로 구분하여 동일 SKU가 양쪽에 존재해도 각각 표시
       for (const line of (lines || []) as any[]) {
         if (line.needs_marking) {
           const boms = (bomData || []).filter((b: any) => b.finished_sku_id === line.finished_sku_id);
           for (const bom of boms as any[]) {
-            const key = bom.component_sku_id;
+            const key = `${bom.component_sku_id}::m`;
             if (!componentMap[key]) {
               componentMap[key] = {
                 lineId: line.id,
@@ -363,15 +376,13 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               };
             }
             componentMap[key].needed += bom.quantity * (line.ordered_qty || 0);
-            // 동일 SKU가 비마킹 라인에서 먼저 등록된 경우 → 마킹으로 승격
-            componentMap[key].needsMarking = componentMap[key].needsMarking || true;
           }
         } else {
           // 비유니폼 단품 (악세서리 등)은 오프라인 발송 대상 아님 → skip
           const skuId = line.finished_sku_id as string;
           if (!skuId?.startsWith('26UN-') && !skuId?.startsWith('26MK-')) continue;
 
-          const key = line.finished_sku_id;
+          const key = `${line.finished_sku_id}::d`;
           if (!componentMap[key]) {
             componentMap[key] = {
               lineId: line.id,
@@ -386,15 +397,29 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               needsMarking: false,
             };
           }
-          // 이미 마킹 BOM에서 등록된 경우 needsMarking 유지 (OR 로직)
           componentMap[key].needed += (line.ordered_qty || 0);
         }
       }
 
       // 2차: sent_detail에서 이미 발송된 수량 차감 (추가 발송 시)
+      // sent_detail은 물리적 SKU 기준이므로 마킹용(::m) 먼저 차감 후 단순출고(::d) 차감
       if (isAdditionalShipment) {
+        const skuGroups: Record<string, string[]> = {};
         for (const key of Object.keys(componentMap)) {
-          componentMap[key].needed = Math.max(0, componentMap[key].needed - (sentDetail[key] || 0));
+          const skuId = componentMap[key].skuId;
+          if (!skuGroups[skuId]) skuGroups[skuId] = [];
+          skuGroups[skuId].push(key);
+        }
+        for (const [skuId, keys] of Object.entries(skuGroups)) {
+          let remaining = sentDetail[skuId] || 0;
+          if (remaining <= 0) continue;
+          // 마킹용(::m) 먼저 차감
+          const sorted = keys.sort((a, b) => (a.endsWith('::m') ? -1 : 1));
+          for (const key of sorted) {
+            const subtract = Math.min(remaining, componentMap[key].needed);
+            componentMap[key].needed -= subtract;
+            remaining -= subtract;
+          }
         }
         // 잔량 0인 구성품 제거
         for (const key of Object.keys(componentMap)) {
@@ -493,12 +518,12 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
   const renderMergedItemCard = (item: MergedShipmentItem, color: string) => {
     const ringColor = color === 'blue' ? 'blue' : color === 'purple' ? 'purple' : color === 'teal' ? 'teal' : 'orange';
     return (
-      <div key={item.skuId} className={`px-3 py-2.5 ${item.isShortage ? 'bg-red-50' : ''}`}>
+      <div key={item.mergeKey} className={`px-3 py-2.5 ${item.isShortage ? 'bg-red-50' : ''}`}>
         <div className="flex items-start gap-2">
           <input
             type="checkbox"
             checked={item.checked}
-            onChange={() => toggleMergedCheck(item.skuId)}
+            onChange={() => toggleMergedCheck(item.mergeKey)}
             className={`mt-1 w-4 h-4 rounded border-gray-300 text-${ringColor}-600`}
           />
           <div className="flex-1 min-w-0">
@@ -525,7 +550,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                 type="number"
                 min={0}
                 value={item.sentQty}
-                onChange={(e) => handleMergedSentChange(item.skuId, parseInt(e.target.value) || 0)}
+                onChange={(e) => handleMergedSentChange(item.mergeKey, parseInt(e.target.value) || 0)}
                 className={`w-20 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-${ringColor}-400 focus:border-${ringColor}-400`}
               />
             </div>
@@ -730,8 +755,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           const woItems = currentCache[wo.id];
           if (!woItems) continue;
           for (const item of woItems) {
-            if (!mergedMap[item.skuId]) {
-              mergedMap[item.skuId] = {
+            // 마킹/단순출고 분리 키: 동일 SKU도 needsMarking이 다르면 별도 항목
+            const mergeKey = `${item.skuId}::${item.needsMarking ? 'm' : 'd'}`;
+            if (!mergedMap[mergeKey]) {
+              mergedMap[mergeKey] = {
+                mergeKey,
                 skuId: item.skuId,
                 skuName: item.skuName,
                 barcode: item.barcode,
@@ -745,9 +773,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                 sources: [],
               };
             }
-            mergedMap[item.skuId].orderedQty += item.orderedQty;
-            mergedMap[item.skuId].needsMarking = mergedMap[item.skuId].needsMarking || item.needsMarking;
-            mergedMap[item.skuId].sources.push({
+            mergedMap[mergeKey].orderedQty += item.orderedQty;
+            mergedMap[mergeKey].sources.push({
               woId: wo.id,
               woDate: wo.download_date,
               woStatus: wo.status || '이관준비',
@@ -785,11 +812,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
     await buildMergedItems();
   };
 
-  // 통합 뷰 체크박스
-  const toggleMergedCheck = (skuId: string) => {
+  // 통합 뷰 체크박스 (mergeKey 기준으로 개별 항목 식별)
+  const toggleMergedCheck = (key: string) => {
     setMergedItems((prev) =>
       prev.map((item) =>
-        item.skuId === skuId ? { ...item, checked: !item.checked } : item
+        item.mergeKey === key ? { ...item, checked: !item.checked } : item
       )
     );
   };
@@ -803,11 +830,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
   const mergedCheckedTotalQty = mergedCheckedUniformQty + mergedCheckedMarkingQty;
   const mergedHasShortage = mergedItems.some((i) => i.isShortage);
 
-  // 통합 뷰 수량 변경
-  const handleMergedSentChange = (skuId: string, value: number) => {
+  // 통합 뷰 수량 변경 (mergeKey 기준)
+  const handleMergedSentChange = (key: string, value: number) => {
     setMergedItems((prev) =>
       prev.map((item) =>
-        item.skuId === skuId ? { ...item, sentQty: Math.max(0, value) } : item
+        item.mergeKey === key ? { ...item, sentQty: Math.max(0, value) } : item
       )
     );
   };
@@ -1140,7 +1167,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         sentQty: item.checked ? item.sentQty : 0,
       }));
       const sentMap: Record<string, number> = {};
-      for (const item of finalItems) sentMap[item.skuId] = item.sentQty;
+      for (const item of finalItems) sentMap[item.skuId] = (sentMap[item.skuId] || 0) + item.sentQty;
 
       const isAdditional = selectedWo.status !== '이관준비';
 
