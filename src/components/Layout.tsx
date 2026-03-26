@@ -38,6 +38,12 @@ const navItems: NavItem[] = [
     roles: ['admin'],
   },
   {
+    label: '진행 현황',
+    path: '/admin/progress',
+    icon: <ClipboardList size={18} />,
+    roles: ['admin'],
+  },
+  {
     label: '작업지시서 업로드',
     path: '/admin/workorder',
     icon: <Upload size={18} />,
