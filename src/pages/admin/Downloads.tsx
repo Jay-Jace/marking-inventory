@@ -526,18 +526,11 @@ export default function Downloads() {
 
   // ── 단계별 설정 ──
 
-  const step1Available = selectedWo
-    ? ['이관중', '입고확인완료', '마킹중', '마킹완료', '출고완료'].includes(selectedWo.status)
-    : false;
-  const step2Available = selectedWo
-    ? ['입고확인완료', '마킹중', '마킹완료', '출고완료'].includes(selectedWo.status)
-    : false;
-  const step3Available = selectedWo
-    ? ['마킹중', '마킹완료', '출고완료'].includes(selectedWo.status)
-    : false;
-  const step4Available = selectedWo
-    ? ['마킹완료', '출고완료'].includes(selectedWo.status)
-    : false;
+  // 실적(activity_log)이 존재하면 해당 STEP 활성화
+  const step1Available = activityData.step1.length > 0;
+  const step2Available = activityData.step2.length > 0;
+  const step3Available = activityData.step3.length > 0;
+  const step4Available = activityData.step4.length > 0;
 
   const steps = [
     {
