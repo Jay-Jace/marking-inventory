@@ -414,7 +414,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
           let remaining = sentDetail[skuId] || 0;
           if (remaining <= 0) continue;
           // 마킹용(::m) 먼저 차감
-          const sorted = keys.sort((a, b) => (a.endsWith('::m') ? -1 : 1));
+          const sorted = keys.sort((a, _b) => (a.endsWith('::m') ? -1 : 1));
           for (const key of sorted) {
             const subtract = Math.min(remaining, componentMap[key].needed);
             componentMap[key].needed -= subtract;
