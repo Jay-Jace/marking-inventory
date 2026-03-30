@@ -168,6 +168,7 @@ async function syncInventoryFromTransactions(rows: RecordTxParams[]): Promise<vo
     const entry = deltaMap.get(key)!;
     switch (r.txType) {
       case '입고': entry.delta += r.quantity; break;
+      case '이동입고': entry.delta += r.quantity; break;
       case '출고': entry.delta -= r.quantity; break;
       case '반품': entry.delta += r.quantity; break;
       case '재고조정': entry.delta += r.quantity; break;
@@ -258,6 +259,7 @@ export async function deleteCjTransactions(params: {
     const current = reverseDelta.get(tx.sku_id) || 0;
     switch (tx.tx_type as TxType) {
       case '입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
+      case '이동입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
       case '출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
       case '반품': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
       case '재고조정': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
@@ -336,6 +338,7 @@ export async function deleteSystemTransactions(params: {
     const current = reverseDelta.get(tx.sku_id) || 0;
     switch (tx.tx_type as TxType) {
       case '입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
+      case '이동입고': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
       case '출고': reverseDelta.set(tx.sku_id, current + tx.quantity); break;
       case '반품': reverseDelta.set(tx.sku_id, current - tx.quantity); break;
       case '재고조정': reverseDelta.set(tx.sku_id, current - tx.quantity); break;

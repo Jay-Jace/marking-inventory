@@ -80,7 +80,7 @@ const navItems: NavItem[] = [
     roles: ['admin'],
   },
   {
-    label: '판매 등록',
+    label: '매장 입/출고 등록',
     path: '/admin/sales',
     icon: <ShoppingCart size={18} />,
     roles: ['admin'],

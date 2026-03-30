@@ -18,12 +18,13 @@ interface LedgerRow {
   skuName: string;
   opening: number;
   inQty: number;
+  transferInQty: number;
+  salesQty: number;
   outQty: number;
   returnQty: number;
   adjustQty: number;
   markingOutQty: number;
   markingInQty: number;
-  salesQty: number;
   closing: number;
 }
 
@@ -131,7 +132,7 @@ export default function StockLedger() {
     try {
       const SYSTEM_START = '2026-02-01';
       const openingMap: Record<string, number> = {};
-      const txMap: Record<string, { in: number; out: number; return: number; adjust: number; markingOut: number; markingIn: number; sales: number }> = {};
+      const txMap: Record<string, { in: number; transferIn: number; sales: number; out: number; return: number; adjust: number; markingOut: number; markingIn: number }> = {};
 
       // 기초/기간내를 각각 페이지네이션 조회 (1,000행 제한 우회)
       const prevDay = new Date(new Date(startDate).getTime() - 86400000).toISOString().slice(0, 10);
@@ -181,6 +182,7 @@ export default function StockLedger() {
         if (!openingMap[key]) openingMap[key] = 0;
         switch (tx.tx_type as TxType) {
           case '입고': openingMap[key] += tx.quantity; break;
+          case '이동입고': openingMap[key] += tx.quantity; break;
           case '출고': openingMap[key] -= tx.quantity; break;
           case '반품': openingMap[key] += tx.quantity; break;
           case '재고조정': openingMap[key] += tx.quantity; break;
@@ -194,9 +196,10 @@ export default function StockLedger() {
       // 기간내 트랜잭션 집계 (base_barcode 기준 합산)
       for (const tx of txData) {
         const key = makeKey(tx.warehouse_id, tx.sku_id);
-        if (!txMap[key]) txMap[key] = { in: 0, out: 0, return: 0, adjust: 0, markingOut: 0, markingIn: 0, sales: 0 };
+        if (!txMap[key]) txMap[key] = { in: 0, transferIn: 0, sales: 0, out: 0, return: 0, adjust: 0, markingOut: 0, markingIn: 0 };
         switch (tx.tx_type as TxType) {
           case '입고': txMap[key].in += tx.quantity; break;
+          case '이동입고': txMap[key].transferIn += tx.quantity; break;
           case '출고': txMap[key].out += tx.quantity; break;
           case '반품': txMap[key].return += tx.quantity; break;
           case '재고조정': txMap[key].adjust += tx.quantity; break;
@@ -241,15 +244,15 @@ export default function StockLedger() {
         groupInfo[key] = { name: bestName, barcode: bestBarcode, skuId: bestSkuId, whName };
       }
 
-      // 수불부 행 계산: 기말 = 기초 + 입고 - 이동출고 + 반품 + 조정 - 마킹출고 + 마킹입고 - 판매
+      // 수불부 행 계산: 기말 = 기초 + 입고 + 이동입고 - 판매 - 이동출고 + 반품 + 조정 - 마킹출고 + 마킹입고
       const ledgerRows: LedgerRow[] = [];
       for (const key of allKeys) {
         const opening = Math.max(0, openingMap[key] || 0);
-        const tx = txMap[key] || { in: 0, out: 0, return: 0, adjust: 0, markingOut: 0, markingIn: 0, sales: 0 };
-        const closing = opening + tx.in - tx.out + tx.return + tx.adjust - tx.markingOut + tx.markingIn - tx.sales;
+        const tx = txMap[key] || { in: 0, transferIn: 0, sales: 0, out: 0, return: 0, adjust: 0, markingOut: 0, markingIn: 0 };
+        const closing = opening + tx.in + tx.transferIn - tx.sales - tx.out + tx.return + tx.adjust - tx.markingOut + tx.markingIn;
         const info = groupInfo[key] || { name: '', barcode: '', skuId: '', whName: '' };
 
-        if (opening === 0 && closing === 0 && tx.in === 0 && tx.out === 0 && tx.return === 0 && tx.adjust === 0 && tx.markingOut === 0 && tx.markingIn === 0 && tx.sales === 0) continue;
+        if (opening === 0 && closing === 0 && tx.in === 0 && tx.transferIn === 0 && tx.sales === 0 && tx.out === 0 && tx.return === 0 && tx.adjust === 0 && tx.markingOut === 0 && tx.markingIn === 0) continue;
 
         ledgerRows.push({
           warehouseName: info.whName,
@@ -258,12 +261,13 @@ export default function StockLedger() {
           skuName: info.name,
           opening,
           inQty: tx.in,
+          transferInQty: tx.transferIn,
+          salesQty: tx.sales,
           outQty: tx.out,
           returnQty: tx.return,
           adjustQty: tx.adjust,
           markingOutQty: tx.markingOut,
           markingInQty: tx.markingIn,
-          salesQty: tx.sales,
           closing,
         });
       }
@@ -679,10 +683,11 @@ export default function StockLedger() {
       '상품명': r.skuName,
       '기초': r.opening,
       '입고': r.inQty,
+      '이동입고': r.transferInQty,
       '판매': r.salesQty,
       '이동출고': r.outQty,
       '반품': r.returnQty,
-      '재고조정': r.adjustQty,
+      '조정': r.adjustQty,
       '마킹출고': r.markingOutQty,
       '마킹입고': r.markingInQty,
       '기말': r.closing,
@@ -1057,10 +1062,11 @@ export default function StockLedger() {
                 <th className="px-3 py-3 text-left text-xs font-semibold text-gray-600 whitespace-nowrap">상품명</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-gray-600 whitespace-nowrap">기초</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-blue-600 whitespace-nowrap">입고</th>
+                <th className="px-3 py-3 text-right text-xs font-semibold text-teal-600 whitespace-nowrap">이동입고</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-red-600 whitespace-nowrap">판매</th>
-                <th className="px-3 py-3 text-right text-xs font-semibold text-red-600 whitespace-nowrap">이동출고</th>
+                <th className="px-3 py-3 text-right text-xs font-semibold text-orange-600 whitespace-nowrap">이동출고</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-green-600 whitespace-nowrap">반품</th>
-                <th className="px-3 py-3 text-right text-xs font-semibold text-orange-600 whitespace-nowrap">조정</th>
+                <th className="px-3 py-3 text-right text-xs font-semibold text-amber-600 whitespace-nowrap">조정</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-purple-600 whitespace-nowrap">마킹출고</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-purple-600 whitespace-nowrap">마킹입고</th>
                 <th className="px-3 py-3 text-right text-xs font-semibold text-gray-900 whitespace-nowrap">기말</th>
@@ -1068,18 +1074,18 @@ export default function StockLedger() {
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={13} className="px-3 py-8 text-center text-gray-400">조회 중...</td></tr>
+                <tr><td colSpan={14} className="px-3 py-8 text-center text-gray-400">조회 중...</td></tr>
               ) : error ? (
-                <tr><td colSpan={13} className="px-3 py-8 text-center text-red-500">{error}</td></tr>
+                <tr><td colSpan={14} className="px-3 py-8 text-center text-red-500">{error}</td></tr>
               ) : rows.length === 0 ? (
-                <tr><td colSpan={13} className="px-3 py-12 text-center text-gray-400">
+                <tr><td colSpan={14} className="px-3 py-12 text-center text-gray-400">
                   <div className="flex flex-col items-center gap-2">
                     <Search className="w-8 h-8 text-gray-300" />
                     <p>조회 기간을 설정한 후 <strong className="text-gray-500">조회</strong> 버튼을 클릭하세요</p>
                   </div>
                 </td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={13} className="px-3 py-8 text-center text-gray-400">검색 결과가 없습니다</td></tr>
+                <tr><td colSpan={14} className="px-3 py-8 text-center text-gray-400">검색 결과가 없습니다</td></tr>
               ) : (
                 <>
                   {/* 합계 행 (맨 위) */}
@@ -1087,10 +1093,11 @@ export default function StockLedger() {
                     <td colSpan={4} className="px-3 py-2.5 text-xs font-bold text-gray-700">합계 ({filtered.length}건)</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums">{filtered.reduce((s, r) => s + r.opening, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-blue-600">{filtered.reduce((s, r) => s + r.inQty, 0).toLocaleString()}</td>
+                    <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-teal-600">{filtered.reduce((s, r) => s + r.transferInQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-red-600">{filtered.reduce((s, r) => s + r.salesQty, 0).toLocaleString()}</td>
-                    <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-red-600">{filtered.reduce((s, r) => s + r.outQty, 0).toLocaleString()}</td>
+                    <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-orange-600">{filtered.reduce((s, r) => s + r.outQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-green-600">{filtered.reduce((s, r) => s + r.returnQty, 0).toLocaleString()}</td>
-                    <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-orange-600">{filtered.reduce((s, r) => s + r.adjustQty, 0).toLocaleString()}</td>
+                    <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-amber-600">{filtered.reduce((s, r) => s + r.adjustQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-purple-600">{filtered.reduce((s, r) => s + r.markingOutQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums text-purple-600">{filtered.reduce((s, r) => s + r.markingInQty, 0).toLocaleString()}</td>
                     <td className="px-3 py-2.5 text-right text-xs font-bold tabular-nums">{filtered.reduce((s, r) => s + r.closing, 0).toLocaleString()}</td>
@@ -1105,16 +1112,19 @@ export default function StockLedger() {
                       <td className="px-3 py-2 text-right text-xs tabular-nums text-blue-600 font-medium">
                         {r.inQty > 0 ? r.inQty.toLocaleString() : '-'}
                       </td>
+                      <td className="px-3 py-2 text-right text-xs tabular-nums text-teal-600 font-medium">
+                        {r.transferInQty > 0 ? r.transferInQty.toLocaleString() : '-'}
+                      </td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums text-red-600 font-medium">
                         {r.salesQty > 0 ? r.salesQty.toLocaleString() : '-'}
                       </td>
-                      <td className="px-3 py-2 text-right text-xs tabular-nums text-red-600 font-medium">
+                      <td className="px-3 py-2 text-right text-xs tabular-nums text-orange-600 font-medium">
                         {r.outQty > 0 ? r.outQty.toLocaleString() : '-'}
                       </td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums text-green-600 font-medium">
                         {r.returnQty > 0 ? r.returnQty.toLocaleString() : '-'}
                       </td>
-                      <td className="px-3 py-2 text-right text-xs tabular-nums text-orange-600 font-medium">
+                      <td className="px-3 py-2 text-right text-xs tabular-nums text-amber-600 font-medium">
                         {r.adjustQty !== 0 ? r.adjustQty.toLocaleString() : '-'}
                       </td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums text-purple-600 font-medium">
