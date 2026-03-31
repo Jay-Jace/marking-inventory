@@ -252,7 +252,7 @@ export default function SalesUpload() {
         // ─── 기존 2/3컬럼 파싱 ───
         const startIdx = raw.length > 0 && typeof raw[0][0] === 'string' && isNaN(Number(raw[0][0])) ? 1 : 0;
 
-        const rows: { barcode: string; quantity: number }[] = [];
+        const rows: { barcode: string; quantity: number; txType?: TxType; saleType?: string }[] = [];
         for (let i = startIdx; i < raw.length; i++) {
           const r = raw[i];
           if (!r || r.length === 0) continue;
@@ -268,8 +268,16 @@ export default function SalesUpload() {
             qty = Number(r[1]) || 0;
           }
 
-          if (!barcode || qty <= 0) continue;
-          rows.push({ barcode, quantity: qty });
+          if (!barcode || qty === 0) continue;
+
+          // 판매 탭에서 음수 수량 → 반품으로 자동 전환
+          if (qty < 0 && activeTab === '판매') {
+            rows.push({ barcode, quantity: Math.abs(qty), txType: '반품' as TxType, saleType: '반품' });
+          } else if (qty < 0) {
+            continue; // 다른 탭에서는 음수 무시
+          } else {
+            rows.push({ barcode, quantity: qty });
+          }
         }
 
         if (rows.length === 0) {
@@ -320,6 +328,8 @@ export default function SalesUpload() {
             skuId: match?.skuId || null,
             skuName: match?.skuName || null,
             matched: !!match,
+            txType: r.txType,
+            saleType: r.saleType,
           };
         });
 
