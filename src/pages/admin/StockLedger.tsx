@@ -251,7 +251,7 @@ export default function StockLedger() {
       // 수불부 행 계산: 기말 = 기초 + 입고 + 이동입고 - 판매 - 이동출고 + 반품 + 조정 - 마킹출고 + 마킹입고
       const ledgerRows: LedgerRow[] = [];
       for (const key of allKeys) {
-        const opening = Math.max(0, openingMap[key] || 0);
+        const opening = openingMap[key] || 0;
         const tx = txMap[key] || { in: 0, transferIn: 0, sales: 0, out: 0, return: 0, adjust: 0, markingOut: 0, markingIn: 0 };
         const closing = opening + tx.in + tx.transferIn - tx.sales - tx.out + tx.return + tx.adjust - tx.markingOut + tx.markingIn;
         const info = groupInfo[key] || { name: '', barcode: '', skuId: '', whName: '' };
