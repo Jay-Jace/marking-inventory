@@ -70,15 +70,54 @@ export default function WorkOrderUpload() {
     }
   };
 
+  // 중복 제외 통계
+  const [dupStats, setDupStats] = useState<{ total: number; added: number; skipped: number } | null>(null);
+
   const handleSave = async () => {
     if (!result) return;
     setSaving(true);
     setSaveProgress(null);
     setError('');
+    setDupStats(null);
 
     try {
-      // 1. 작업지시서 생성
-      setSaveProgress({ current: 1, total: 4, step: '작업지시서 생성 중...' });
+      // 1. 같은 download_date 작업지시서가 있는지 확인
+      setSaveProgress({ current: 1, total: 5, step: '중복 확인 중...' });
+      const { data: existingWos } = await supabase
+        .from('work_order')
+        .select('id')
+        .eq('download_date', result.downloadDate)
+        .limit(10);
+
+      // 기존 작업지시서들의 라인에서 이미 등록된 SKU 목록 조회
+      const existingSkuIds = new Set<string>();
+      if (existingWos && existingWos.length > 0) {
+        const woIds = existingWos.map((w) => w.id);
+        for (let i = 0; i < woIds.length; i += 10) {
+          const batch = woIds.slice(i, i + 10);
+          const { data: existingLines } = await supabase
+            .from('work_order_line')
+            .select('finished_sku_id')
+            .in('work_order_id', batch);
+          if (existingLines) {
+            for (const line of existingLines) existingSkuIds.add(line.finished_sku_id);
+          }
+        }
+      }
+
+      // 중복 제외한 신규 라인만 필터
+      const newLines = result.lines.filter((l) => !existingSkuIds.has(l.skuId));
+      const skippedCount = result.lines.length - newLines.length;
+
+      if (newLines.length === 0) {
+        setDupStats({ total: result.lines.length, added: 0, skipped: skippedCount });
+        setSaving(false);
+        setSaveProgress(null);
+        return;
+      }
+
+      // 2. 작업지시서 생성
+      setSaveProgress({ current: 2, total: 5, step: '작업지시서 생성 중...' });
       const { data: wo, error: woErr } = await supabase
         .from('work_order')
         .insert({ download_date: result.downloadDate, status: '업로드됨' })
@@ -87,9 +126,9 @@ export default function WorkOrderUpload() {
 
       if (woErr) throw woErr;
 
-      // 2. SKU 자동 등록 (없는 경우)
-      setSaveProgress({ current: 2, total: 4, step: `SKU 등록 중... (${result.lines.length}건)` });
-      const skuUpserts = result.lines.map((l) => ({
+      // 3. SKU 자동 등록 (없는 경우)
+      setSaveProgress({ current: 3, total: 5, step: `SKU 등록 중... (${newLines.length}건)` });
+      const skuUpserts = newLines.map((l) => ({
         sku_id: l.skuId,
         sku_name: l.skuName,
         barcode: l.barcode || null,
@@ -99,8 +138,7 @@ export default function WorkOrderUpload() {
 
       await supabase.from('sku').upsert(skuUpserts, { onConflict: 'sku_id' });
 
-      // 단품(유니폼+마킹) berriz_id 업데이트 (이관지시서 시트에서 추출)
-      // 20건씩 배치 병렬 처리로 속도 개선
+      // 단품(유니폼+마킹) berriz_id 업데이트
       if (result.berrizIdMap) {
         const entries = Object.entries(result.berrizIdMap);
         const BATCH = 20;
@@ -113,16 +151,16 @@ export default function WorkOrderUpload() {
             )
           );
           setSaveProgress({
-            current: 2, total: 4,
+            current: 3, total: 5,
             step: `SKU 등록 중... (${Math.min(i + BATCH, entries.length)}/${entries.length})`,
           });
         }
       }
 
-      // 3. 작업지시서 라인 생성
-      setSaveProgress({ current: 3, total: 4, step: `라인 등록 중... (${result.lines.length}건)` });
+      // 4. 작업지시서 라인 생성 (신규만)
+      setSaveProgress({ current: 4, total: 5, step: `라인 등록 중... (${newLines.length}건, 중복 ${skippedCount}건 제외)` });
       const markingSkuIdSet = new Set(result.markingLines.map((l) => l.skuId));
-      const lines = result.lines.map((l) => ({
+      const lines = newLines.map((l) => ({
         work_order_id: wo.id,
         finished_sku_id: l.skuId,
         ordered_qty: l.quantity,
@@ -135,14 +173,15 @@ export default function WorkOrderUpload() {
       const { error: lineErr } = await supabase.from('work_order_line').insert(lines);
       if (lineErr) throw lineErr;
 
-      // 4. 상태 업데이트
-      setSaveProgress({ current: 4, total: 4, step: '상태 업데이트 중...' });
+      // 5. 상태 업데이트
+      setSaveProgress({ current: 5, total: 5, step: '상태 업데이트 중...' });
       await supabase
         .from('work_order')
         .update({ status: '이관준비' })
         .eq('id', wo.id);
 
       setSavedWorkOrderId(wo.id);
+      setDupStats({ total: result.lines.length, added: newLines.length, skipped: skippedCount });
     } catch (err: any) {
       setError(err.message || '저장 중 오류가 발생했습니다.');
     } finally {
@@ -308,6 +347,21 @@ export default function WorkOrderUpload() {
         </div>
       )}
 
+      {/* 전체 중복 — 신규 라인 없음 */}
+      {dupStats && dupStats.added === 0 && !savedWorkOrderId && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-5">
+          <div className="flex items-center gap-3">
+            <AlertTriangle size={24} className="text-yellow-600" />
+            <div>
+              <p className="font-semibold text-yellow-900">모든 라인이 이미 등록되어 있습니다</p>
+              <p className="text-sm text-yellow-700">
+                전체 {dupStats.total}건 중 {dupStats.skipped}건이 기존 작업지시서에 이미 존재합니다. 새로 추가할 항목이 없습니다.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 저장 완료 */}
       {savedWorkOrderId && (
         <div className="bg-green-50 border border-green-200 rounded-xl p-5">
@@ -316,7 +370,9 @@ export default function WorkOrderUpload() {
             <div>
               <p className="font-semibold text-green-900">작업지시서가 등록되었습니다</p>
               <p className="text-sm text-green-700">
-                양식 다운로드 페이지에서 이관지시서와 재고조정양식을 다운로드하세요.
+                {dupStats && dupStats.skipped > 0
+                  ? `전체 ${dupStats.total}건 중 신규 ${dupStats.added}건 등록, 중복 ${dupStats.skipped}건 제외`
+                  : '양식 다운로드 페이지에서 이관지시서와 재고조정양식을 다운로드하세요.'}
               </p>
             </div>
           </div>
