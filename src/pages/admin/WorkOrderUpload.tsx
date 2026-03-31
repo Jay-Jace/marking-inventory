@@ -81,13 +81,12 @@ export default function WorkOrderUpload() {
     setDupStats(null);
 
     try {
-      // 1. 같은 download_date 작업지시서가 있는지 확인
+      // 1. 모든 활성 작업지시서(이관준비~마킹완료)에서 이미 등록된 SKU 확인
       setSaveProgress({ current: 1, total: 5, step: '중복 확인 중...' });
       const { data: existingWos } = await supabase
         .from('work_order')
-        .select('id')
-        .eq('download_date', result.downloadDate)
-        .limit(10);
+        .select('id, download_date, status')
+        .in('status', ['이관준비', '이관중', '입고확인완료', '마킹중', '마킹완료']);
 
       // 기존 작업지시서들의 라인에서 이미 등록된 SKU 목록 조회
       const existingSkuIds = new Set<string>();
