@@ -11,6 +11,7 @@ export interface ParsedOrder {
   needsMarking: boolean;
   needsOfflineShipment: boolean; // 오프라인 매장 출고 대상 (유니폼/마킹키트만)
   markingType: 'completed' | 'kit' | 'none'; // 완제품마킹 / 마킹키트 / 마킹없음
+  deliveryStatus: string; // 엑셀 배송상태 (배송대기/배송준비중/배송중/배송완료 등)
 }
 
 export interface OrderParseResult {
@@ -105,6 +106,7 @@ export function parseOrderExcel(wb: XLSX.WorkBook): OrderParseResult {
       needsMarking,
       needsOfflineShipment,
       markingType,
+      deliveryStatus: String(row[colIdx.status] || '').trim(),
     });
 
     orderNumbers.add(orderNumber);

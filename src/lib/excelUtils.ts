@@ -7,6 +7,7 @@ import * as XLSX from 'xlsx';
 export interface ExcelMatchedItem {
   skuId: string;
   uploadedQty: number;
+  matchKey: string; // SKU ID 또는 "SKU_ID::마킹 예정" / "SKU_ID::단순 출고"
 }
 
 export interface ExcelParseResult {
@@ -18,6 +19,19 @@ export interface ExcelItem {
   skuId: string;
   skuName: string;
   barcode: string | null;
+  needsMarking?: boolean; // 마킹 예정 / 단순 출고 구분 (옵셔널: 하위 호환)
+}
+
+// ──────────────────────────────────────────────
+// matchKey 헬퍼
+// ──────────────────────────────────────────────
+
+const MARKING_LABEL = '마킹 예정';
+const DIRECT_LABEL = '단순 출고';
+
+export function buildMatchKey(skuId: string, needsMarking?: boolean): string {
+  if (needsMarking === undefined) return skuId;
+  return `${skuId}::${needsMarking ? MARKING_LABEL : DIRECT_LABEL}`;
 }
 
 // ──────────────────────────────────────────────
@@ -28,6 +42,7 @@ const SKU_ID_PATTERNS = ['sku_id', 'skuid', 'sku id', 'sku', '품목코드', 'it
 const BARCODE_PATTERNS = ['barcode', '바코드', 'bar_code', 'bar code'];
 const SKU_NAME_PATTERNS = ['sku_name', 'skuname', 'sku name', 'sku명', '품목명', '상품명', 'name', '이름'];
 const QTY_PATTERNS = ['qty', '수량', 'quantity', '개수', '발송수량', '입고수량', 'amount'];
+const CATEGORY_PATTERNS = ['구분', 'category', 'type', '마킹구분'];
 
 function normalizeHeader(header: unknown): string {
   return String(header ?? '').toLowerCase().trim().replace(/\s+/g, ' ');
@@ -38,7 +53,7 @@ function findColumnIndex(headers: unknown[], patterns: string[]): number {
 }
 
 // ──────────────────────────────────────────────
-// 엑셀 파싱 — SKU ID / 바코드 / SKU명 중 하나로 매칭
+// 엑셀 파싱 — SKU ID / 바코드 / SKU명 + 구분 컬럼으로 매칭
 // ──────────────────────────────────────────────
 
 export function parseQtyExcel(file: File, items: ExcelItem[]): Promise<ExcelParseResult> {
@@ -63,6 +78,7 @@ export function parseQtyExcel(file: File, items: ExcelItem[]): Promise<ExcelPars
         const barcodeCol = findColumnIndex(headers, BARCODE_PATTERNS);
         const skuNameCol = findColumnIndex(headers, SKU_NAME_PATTERNS);
         const qtyCol = findColumnIndex(headers, QTY_PATTERNS);
+        const categoryCol = findColumnIndex(headers, CATEGORY_PATTERNS);
 
         if (qtyCol === -1) {
           reject(new Error('수량 컬럼을 찾을 수 없습니다. 헤더에 "수량" 또는 "qty"를 포함해주세요.'));
@@ -73,15 +89,37 @@ export function parseQtyExcel(file: File, items: ExcelItem[]): Promise<ExcelPars
           return;
         }
 
+        // items에 needsMarking 정보가 있는지 확인 (복합 매칭 모드)
+        const hasCategory = items.some((i) => i.needsMarking !== undefined);
+
         // 룩업 맵 구성
-        const skuIdMap = new Map<string, string>();
-        const barcodeMap = new Map<string, string>();
-        const skuNameMap = new Map<string, string>();
+        // 복합 키 모드: "sku_lower::마킹 예정" / "sku_lower::단순 출고"
+        // 단순 모드: "sku_lower"
+        const skuIdMap = new Map<string, { skuId: string; matchKey: string }>();
+        const barcodeMap = new Map<string, { skuId: string; matchKey: string }>();
+        const skuNameMap = new Map<string, { skuId: string; matchKey: string }>();
 
         for (const item of items) {
-          skuIdMap.set(item.skuId.toLowerCase(), item.skuId);
-          if (item.barcode) barcodeMap.set(item.barcode.toLowerCase(), item.skuId);
-          skuNameMap.set(item.skuName.toLowerCase(), item.skuId);
+          const matchKey = buildMatchKey(item.skuId, hasCategory ? item.needsMarking : undefined);
+
+          if (hasCategory && item.needsMarking !== undefined) {
+            // 복합 키: "sku_lower::마킹 예정"
+            const catLabel = item.needsMarking ? MARKING_LABEL : DIRECT_LABEL;
+            const compositeKey = `${item.skuId.toLowerCase()}::${catLabel}`;
+            skuIdMap.set(compositeKey, { skuId: item.skuId, matchKey });
+            if (item.barcode) barcodeMap.set(`${item.barcode.toLowerCase()}::${catLabel}`, { skuId: item.skuId, matchKey });
+            skuNameMap.set(`${item.skuName.toLowerCase()}::${catLabel}`, { skuId: item.skuId, matchKey });
+          }
+          // 단순 키도 항상 등록 (폴백 + 하위 호환)
+          if (!skuIdMap.has(item.skuId.toLowerCase())) {
+            skuIdMap.set(item.skuId.toLowerCase(), { skuId: item.skuId, matchKey });
+          }
+          if (item.barcode && !barcodeMap.has(item.barcode.toLowerCase())) {
+            barcodeMap.set(item.barcode.toLowerCase(), { skuId: item.skuId, matchKey });
+          }
+          if (!skuNameMap.has(item.skuName.toLowerCase())) {
+            skuNameMap.set(item.skuName.toLowerCase(), { skuId: item.skuId, matchKey });
+          }
         }
 
         const matched: ExcelMatchedItem[] = [];
@@ -96,32 +134,42 @@ export function parseQtyExcel(file: File, items: ExcelItem[]): Promise<ExcelPars
           const qty = Number(rawQty);
           if (isNaN(qty)) continue;
 
-          let matchedSkuId: string | undefined;
+          // 구분 값 추출
+          const catValue = categoryCol !== -1 && row[categoryCol] != null
+            ? String(row[categoryCol]).trim()
+            : '';
+
+          let matchResult: { skuId: string; matchKey: string } | undefined;
           let identifier = '';
 
-          // 1순위: SKU ID
+          // 1순위: SKU ID (+ 구분)
           if (skuIdCol !== -1 && row[skuIdCol] != null) {
             const val = String(row[skuIdCol]).trim().toLowerCase();
             identifier = val;
-            matchedSkuId = skuIdMap.get(val);
+            // 복합 키 시도
+            if (catValue) matchResult = skuIdMap.get(`${val}::${catValue}`);
+            // 폴백: 단순 키
+            if (!matchResult) matchResult = skuIdMap.get(val);
           }
 
-          // 2순위: 바코드
-          if (!matchedSkuId && barcodeCol !== -1 && row[barcodeCol] != null) {
+          // 2순위: 바코드 (+ 구분)
+          if (!matchResult && barcodeCol !== -1 && row[barcodeCol] != null) {
             const val = String(row[barcodeCol]).trim().toLowerCase();
             if (!identifier) identifier = val;
-            matchedSkuId = barcodeMap.get(val);
+            if (catValue) matchResult = barcodeMap.get(`${val}::${catValue}`);
+            if (!matchResult) matchResult = barcodeMap.get(val);
           }
 
-          // 3순위: SKU명
-          if (!matchedSkuId && skuNameCol !== -1 && row[skuNameCol] != null) {
+          // 3순위: SKU명 (+ 구분)
+          if (!matchResult && skuNameCol !== -1 && row[skuNameCol] != null) {
             const val = String(row[skuNameCol]).trim().toLowerCase();
             if (!identifier) identifier = val;
-            matchedSkuId = skuNameMap.get(val);
+            if (catValue) matchResult = skuNameMap.get(`${val}::${catValue}`);
+            if (!matchResult) matchResult = skuNameMap.get(val);
           }
 
-          if (matchedSkuId) {
-            matched.push({ skuId: matchedSkuId, uploadedQty: Math.max(0, qty) });
+          if (matchResult) {
+            matched.push({ skuId: matchResult.skuId, uploadedQty: Math.max(0, qty), matchKey: matchResult.matchKey });
           } else if (identifier) {
             unmatched.push(identifier);
           }
@@ -140,19 +188,35 @@ export function parseQtyExcel(file: File, items: ExcelItem[]): Promise<ExcelPars
 }
 
 // ──────────────────────────────────────────────
-// 양식 다운로드 — 현재 품목 목록 기반
+// 양식 다운로드 — 현재 품목 목록 기반 (구분 컬럼 옵션)
 // ──────────────────────────────────────────────
 
 export function generateTemplate(
-  items: { skuId: string; skuName: string; barcode?: string | null; qty: number }[],
+  items: { skuId: string; skuName: string; barcode?: string | null; qty: number; needsMarking?: boolean }[],
   filename: string
 ): void {
-  const wsData = [
-    ['SKU ID', 'SKU명', '바코드', '수량'],
-    ...items.map((item) => [item.skuId, item.skuName, item.barcode ?? '', item.qty]),
-  ];
+  const hasCategory = items.some((i) => i.needsMarking !== undefined);
+
+  const wsData = hasCategory
+    ? [
+        ['SKU ID', 'SKU명', '바코드', '구분', '수량'],
+        ...items.map((item) => [
+          item.skuId,
+          item.skuName,
+          item.barcode ?? '',
+          item.needsMarking !== undefined ? (item.needsMarking ? MARKING_LABEL : DIRECT_LABEL) : '',
+          item.qty,
+        ]),
+      ]
+    : [
+        ['SKU ID', 'SKU명', '바코드', '수량'],
+        ...items.map((item) => [item.skuId, item.skuName, item.barcode ?? '', item.qty]),
+      ];
+
   const ws = XLSX.utils.aoa_to_sheet(wsData);
-  ws['!cols'] = [{ wch: 20 }, { wch: 30 }, { wch: 16 }, { wch: 10 }];
+  ws['!cols'] = hasCategory
+    ? [{ wch: 20 }, { wch: 30 }, { wch: 16 }, { wch: 12 }, { wch: 10 }]
+    : [{ wch: 20 }, { wch: 30 }, { wch: 16 }, { wch: 10 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, '수량입력');
   XLSX.writeFile(wb, filename);

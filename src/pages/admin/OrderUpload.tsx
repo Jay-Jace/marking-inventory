@@ -8,8 +8,20 @@ import type { OnlineOrder } from '../../types';
 import * as XLSX from 'xlsx';
 import {
   ShoppingCart, Upload, Download, Search, AlertTriangle, CheckCircle,
-  Package, X, FileUp, XCircle,
+  Package, X, FileUp, XCircle, BarChart3,
 } from 'lucide-react';
+
+interface MarkingAnalysisResult {
+  orderId: string;
+  orderNumber: string;
+  orderDate: string;
+  skuId: string;
+  skuName: string;
+  optionText: string;
+  quantity: number;
+  canMark: boolean;
+  missingComponents: { skuId: string; skuName: string; needed: number; available: number }[];
+}
 
 export default function OrderUpload({ currentUserId }: { currentUserId: string }) {
   const isStale = useStaleGuard();
@@ -19,7 +31,9 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   const [parsed, setParsed] = useState<ParsedOrder[] | null>(null);
   const [parseSummary, setParseSummary] = useState<any>(null);
   const [newOrders, setNewOrders] = useState<ParsedOrder[]>([]);
-  const [dupCount, setDupCount] = useState(0);
+  const [autoCompleteOrders, setAutoCompleteOrders] = useState<{ orderNumber: string; skuId: string; id: string }[]>([]); // 자동 출고완료 대상
+  const [revertOrders, setRevertOrders] = useState<{ orderNumber: string; skuId: string; id: string }[]>([]); // 역방향 보정: 출고완료→신규
+  const [skipCount, setSkipCount] = useState(0); // 작업 진행중/중복 스킵
   const [saving, setSaving] = useState(false);
   const [saveProgress, setSaveProgress] = useState<{ current: number; total: number } | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -48,6 +62,14 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   // 작업지시서 생성
   const [creatingWo, setCreatingWo] = useState(false);
   const [woResult, setWoResult] = useState<string | null>(null);
+
+  // 마킹 가능 주문 분석
+  const [markingAnalysis, setMarkingAnalysis] = useState<{
+    loading: boolean;
+    results: MarkingAnalysisResult[] | null;
+    summary: { total: number; possible: number; shortage: number; possibleQty: number; shortageQty: number } | null;
+    analysisTime: string | null;
+  }>({ loading: false, results: null, summary: null, analysisTime: null });
 
   // ── 대시보드 로딩 ──
   const loadDashboard = useCallback(async () => {
@@ -95,12 +117,15 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     return true;
   });
 
-  // ── 엑셀 파싱 ──
+  // ── 엑셀 파싱 (3-case 로직) ──
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = '';
     setMessage(null);
+    setAutoCompleteOrders([]);
+    setRevertOrders([]);
+    setSkipCount(0);
 
     try {
       const buf = await file.arrayBuffer();
@@ -112,12 +137,58 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       setParsed(uniformOnly);
       setParseSummary({ ...result.summary, total: uniformOnly.length, noMarking: uniformOnly.filter(o => !o.needsMarking).length });
 
-      // 기존 주문 중복 체크
-      const existingSet = new Set(orders.map(o => `${o.order_number}|${o.sku_id}`));
-      const newOnes = uniformOnly.filter(o => !existingSet.has(`${o.orderNumber}|${o.skuId}`));
-      const dups = uniformOnly.length - newOnes.length;
+      // ── Case 1: 배송준비중/배송중/배송완료 → 물류센터 처리됨 → 자동 출고완료 ──
+      const completedStatuses = ['배송준비중', '배송중', '배송완료'];
+      const caseAutoComplete = uniformOnly.filter(o => completedStatuses.includes(o.deliveryStatus));
+      const casePending = uniformOnly.filter(o => !completedStatuses.includes(o.deliveryStatus)); // 배송대기
+
+      // 자동 출고완료 대상: 우리 시스템에 존재하면서 아직 출고완료/취소 아닌 주문
+      const autoCompleteTargets: typeof autoCompleteOrders = [];
+      if (caseAutoComplete.length > 0) {
+        const existingMap = new Map(orders.map(o => [`${o.order_number}|${o.sku_id}`, o]));
+        for (const o of caseAutoComplete) {
+          const key = `${o.orderNumber}|${o.skuId}`;
+          const existing = existingMap.get(key);
+          if (existing && existing.status !== '출고완료' && existing.status !== '취소') {
+            autoCompleteTargets.push({ orderNumber: o.orderNumber, skuId: o.skuId, id: existing.id });
+          }
+        }
+      }
+      setAutoCompleteOrders(autoCompleteTargets);
+
+      // ── Case 2 & 3 & 역방향 보정: 배송대기 주문 분류 ──
+      const existingMap = new Map(orders.map(o => [`${o.order_number}|${o.sku_id}`, o]));
+      // 활성 작업지시서에 연결된 주문 (발송대기/이관중/마킹중 상태)
+      const activeWoOrderSet = new Set(
+        orders
+          .filter(o => o.work_order_id && ['발송대기', '이관중', '마킹중', '마킹완료'].includes(o.status))
+          .map(o => `${o.order_number}|${o.sku_id}`)
+      );
+
+      let skipCnt = 0;
+      const newOnes: ParsedOrder[] = [];
+      const revertTargets: typeof revertOrders = [];
+      for (const o of casePending) {
+        const key = `${o.orderNumber}|${o.skuId}`;
+        const existing = existingMap.get(key);
+        if (activeWoOrderSet.has(key)) {
+          // Case 2: 작업 진행중 → 스킵
+          skipCnt++;
+        } else if (existing && existing.status === '출고완료') {
+          // 역방향 보정: 엑셀에서 배송대기인데 우리 시스템에서 출고완료 → 신규로 되돌리기
+          revertTargets.push({ orderNumber: o.orderNumber, skuId: o.skuId, id: existing.id });
+        } else if (existing) {
+          // 이미 존재 (신규/재고부족 등) → 중복이므로 스킵
+          skipCnt++;
+        } else {
+          // Case 3: 완전 신규 → 등록 대상
+          newOnes.push(o);
+        }
+      }
+      setRevertOrders(revertTargets);
+
       setNewOrders(newOnes);
-      setDupCount(dups);
+      setSkipCount(skipCnt);
 
       // 재고 부족 체크 (오프라인 매장)
       await checkInventoryShortage(newOnes);
@@ -197,12 +268,43 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
 
   // ── 저장 ──
   const handleSave = async () => {
-    if (newOrders.length === 0) return;
+    if (newOrders.length === 0 && autoCompleteOrders.length === 0 && revertOrders.length === 0) return;
     setSaving(true);
-    setSaveProgress({ current: 0, total: newOrders.length });
+    const totalWork = newOrders.length + autoCompleteOrders.length + revertOrders.length;
+    setSaveProgress({ current: 0, total: totalWork });
 
     try {
       let ok = 0;
+      let autoOk = 0;
+      let revertOk = 0;
+
+      // ── Case 1 처리: 배송준비중/배송중/배송완료 → 출고완료 자동 처리 ──
+      if (autoCompleteOrders.length > 0) {
+        const ids = autoCompleteOrders.map(o => o.id);
+        for (let i = 0; i < ids.length; i += 100) {
+          await supabaseAdmin
+            .from('online_order')
+            .update({ status: '출고완료' })
+            .in('id', ids.slice(i, i + 100));
+          autoOk += Math.min(100, ids.length - i);
+          setSaveProgress({ current: autoOk, total: totalWork });
+        }
+      }
+
+      // ── 역방향 보정: 출고완료 → 신규 되돌리기 (작업지시서 연결 해제) ──
+      if (revertOrders.length > 0) {
+        const ids = revertOrders.map(o => o.id);
+        for (let i = 0; i < ids.length; i += 100) {
+          await supabaseAdmin
+            .from('online_order')
+            .update({ status: '신규', work_order_id: null })
+            .in('id', ids.slice(i, i + 100));
+          revertOk += Math.min(100, ids.length - i);
+          setSaveProgress({ current: autoOk + revertOk, total: totalWork });
+        }
+      }
+
+      // ── Case 3 처리: 신규 주문 등록 ──
       for (let i = 0; i < newOrders.length; i += 100) {
         const batch = newOrders.slice(i, i + 100).map(o => ({
           order_number: o.orderNumber,
@@ -220,7 +322,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           .from('online_order')
           .upsert(batch, { onConflict: 'order_number,sku_id', ignoreDuplicates: true });
         if (!error) ok += batch.length;
-        setSaveProgress({ current: Math.min(i + 100, newOrders.length), total: newOrders.length });
+        setSaveProgress({ current: autoOk + revertOk + Math.min(i + 100, newOrders.length), total: totalWork });
       }
 
       // activity_log
@@ -228,12 +330,20 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         user_id: currentUserId,
         action_type: 'order_upload',
         action_date: new Date().toISOString().split('T')[0],
-        summary: { total: ok, marking: newOrders.filter(o => o.needsMarking).length },
+        summary: { total: ok, autoComplete: autoOk, reverted: revertOk, skipped: skipCount, marking: newOrders.filter(o => o.needsMarking).length },
       }).then(() => {});
 
-      setMessage({ type: 'success', text: `주문 ${ok}건 등록 완료 (중복 제외 ${dupCount}건)` });
+      const parts: string[] = [];
+      if (ok > 0) parts.push(`신규 ${ok}건 등록`);
+      if (autoOk > 0) parts.push(`출고완료 ${autoOk}건 자동 처리`);
+      if (revertOk > 0) parts.push(`역보정 ${revertOk}건 (출고완료→신규)`);
+      if (skipCount > 0) parts.push(`진행중/중복 ${skipCount}건 제외`);
+      setMessage({ type: 'success', text: parts.join(' / ') });
       setParsed(null);
       setNewOrders([]);
+      setAutoCompleteOrders([]);
+      setRevertOrders([]);
+      setSkipCount(0);
       loadDashboard();
     } catch (err: any) {
       setMessage({ type: 'error', text: `저장 실패: ${err.message}` });
@@ -387,6 +497,32 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         }
       }
 
+      // ── 1.5단계: 진행중 작업지시서에 할당된 수량 차감 → 가용재고 ──
+      const activeStatuses = ['이관준비', '이관중', '입고확인완료', '마킹중', '마킹완료'];
+      const { data: activeWos } = await supabaseAdmin
+        .from('work_order')
+        .select('id')
+        .in('status', activeStatuses);
+
+      if (activeWos && activeWos.length > 0) {
+        const woIds = activeWos.map(w => w.id);
+        // 작업지시서 라인에서 SKU별 할당 수량 합산
+        for (let i = 0; i < woIds.length; i += 50) {
+          const batchIds = woIds.slice(i, i + 50);
+          const { data: woLines } = await supabaseAdmin
+            .from('work_order_line')
+            .select('finished_sku_id, ordered_qty')
+            .in('work_order_id', batchIds);
+          if (woLines) {
+            for (const line of woLines) {
+              if (invMap[line.finished_sku_id] !== undefined) {
+                invMap[line.finished_sku_id] = (invMap[line.finished_sku_id] || 0) - (line.ordered_qty || 0);
+              }
+            }
+          }
+        }
+      }
+
       // ── 2단계: BOM 조회 (마킹 완제품 → 구성품) ──
       const markingSkuIds = [...new Set(allEligible.filter(o => o.sku_id.startsWith('26UN-') && o.sku_id.includes('_')).map(o => o.sku_id))];
       const bomMap: Record<string, { components: { skuId: string; qty: number }[] }> = {};
@@ -497,10 +633,13 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       if (woErr || !wo) throw woErr || new Error('작업지시서 생성 실패');
       const woId = wo.id;
 
-      // SKU별 합산
-      const skuMap: Record<string, { qty: number; needsMarking: boolean; skuName: string }> = {};
+      // 주문일시 빠른 순 정렬 (오래된 주문부터 처리)
+      canShip.sort((a, b) => (a.order_date || '').localeCompare(b.order_date || ''));
+
+      // SKU별 합산 (첫 등장 순서 = 주문일시 빠른 순)
+      const skuMap: Record<string, { qty: number; needsMarking: boolean; skuName: string; firstOrderDate: string }> = {};
       for (const o of canShip) {
-        if (!skuMap[o.sku_id]) skuMap[o.sku_id] = { qty: 0, needsMarking: o.needs_marking, skuName: o.sku_name || '' };
+        if (!skuMap[o.sku_id]) skuMap[o.sku_id] = { qty: 0, needsMarking: o.needs_marking, skuName: o.sku_name || '', firstOrderDate: o.order_date || '' };
         skuMap[o.sku_id].qty += o.quantity;
       }
 
@@ -513,11 +652,13 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         await supabaseAdmin.from('sku').upsert(batch, { onConflict: 'sku_id', ignoreDuplicates: true });
       }
 
-      // work_order_line 삽입
-      const lines = Object.entries(skuMap).map(([skuId, v]) => ({
-        work_order_id: woId, finished_sku_id: skuId, ordered_qty: v.qty,
-        sent_qty: 0, received_qty: 0, marked_qty: 0, needs_marking: v.needsMarking,
-      }));
+      // work_order_line 삽입 (주문일시 빠른 순)
+      const lines = Object.entries(skuMap)
+        .sort((a, b) => (a[1].firstOrderDate).localeCompare(b[1].firstOrderDate))
+        .map(([skuId, v]) => ({
+          work_order_id: woId, finished_sku_id: skuId, ordered_qty: v.qty,
+          sent_qty: 0, received_qty: 0, marked_qty: 0, needs_marking: v.needsMarking,
+        }));
       for (let i = 0; i < lines.length; i += 100) {
         const { error } = await supabaseAdmin.from('work_order_line').insert(lines.slice(i, i + 100));
         if (error) throw error;
@@ -546,6 +687,148 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       setMessage({ type: 'error', text: `작업지시서 생성 실패: ${err.message}` });
     } finally {
       setCreatingWo(false);
+    }
+  };
+
+  // ── 마킹 가능 주문 분석 ──
+  const analyzeMarkingPossible = async () => {
+    setMarkingAnalysis({ loading: true, results: null, summary: null, analysisTime: null });
+    try {
+      // 1. 활성 작업지시서 조회
+      const { data: activeWos } = await supabaseAdmin
+        .from('work_order')
+        .select('id')
+        .in('status', ['이관준비', '이관중', '입고확인완료', '마킹중', '마킹완료']);
+      const woIds = (activeWos || []).map((w: any) => w.id);
+      if (woIds.length === 0) {
+        setMarkingAnalysis({ loading: false, results: [], summary: { total: 0, possible: 0, shortage: 0, possibleQty: 0, shortageQty: 0 }, analysisTime: new Date().toLocaleString('ko-KR') });
+        return;
+      }
+
+      // 2. 마킹 주문 조회 (주문일 순)
+      const markingOrders: any[] = [];
+      for (let i = 0; i < woIds.length; i += 50) {
+        let offset = 0;
+        while (true) {
+          const { data } = await supabaseAdmin
+            .from('online_order')
+            .select('id, order_number, order_date, sku_id, sku_name, option_text, quantity, work_order_id')
+            .eq('needs_marking', true)
+            .in('status', ['발송대기', '이관중', '마킹중'])
+            .in('work_order_id', woIds.slice(i, i + 50))
+            .order('order_date', { ascending: true })
+            .range(offset, offset + 999);
+          if (!data || data.length === 0) break;
+          markingOrders.push(...data);
+          if (data.length < 1000) break;
+          offset += 1000;
+        }
+      }
+      markingOrders.sort((a, b) => (a.order_date || '').localeCompare(b.order_date || ''));
+
+      if (markingOrders.length === 0) {
+        setMarkingAnalysis({ loading: false, results: [], summary: { total: 0, possible: 0, shortage: 0, possibleQty: 0, shortageQty: 0 }, analysisTime: new Date().toLocaleString('ko-KR') });
+        return;
+      }
+
+      // 3. 플레이위즈 재고 조회
+      const { data: pwWh } = await supabaseAdmin.from('warehouse').select('id').eq('name', '플레이위즈').single();
+      const pwInvMap: Record<string, number> = {};
+      if (pwWh) {
+        let offset = 0;
+        while (true) {
+          const { data: inv } = await supabaseAdmin.from('inventory').select('sku_id, quantity').eq('warehouse_id', pwWh.id).range(offset, offset + 999);
+          if (!inv || inv.length === 0) break;
+          for (const r of inv) pwInvMap[r.sku_id] = r.quantity;
+          if (inv.length < 1000) break;
+          offset += 1000;
+        }
+      }
+
+      // 4. BOM 조회
+      const finishedSkuIds = [...new Set(markingOrders.map(o => o.sku_id))];
+      const bomMap: Record<string, { skuId: string; skuName: string; qty: number }[]> = {};
+      for (let i = 0; i < finishedSkuIds.length; i += 500) {
+        const { data: boms } = await supabaseAdmin
+          .from('bom')
+          .select('finished_sku_id, component_sku_id, quantity, component_sku:sku!bom_component_sku_id_fkey(sku_name)')
+          .in('finished_sku_id', finishedSkuIds.slice(i, i + 500));
+        if (boms) for (const b of boms as any[]) {
+          if (!bomMap[b.finished_sku_id]) bomMap[b.finished_sku_id] = [];
+          bomMap[b.finished_sku_id].push({
+            skuId: b.component_sku_id,
+            skuName: b.component_sku?.sku_name || b.component_sku_id,
+            qty: b.quantity || 1,
+          });
+        }
+      }
+
+      // 5. FIFO 할당
+      const availablePool = { ...pwInvMap };
+      const results: MarkingAnalysisResult[] = [];
+
+      for (const order of markingOrders) {
+        // BOM 분해
+        let components = bomMap[order.sku_id];
+        if (!components) {
+          // BOM 미등록 → 패턴 추정
+          const baseSku = order.sku_id.split('_')[0];
+          const mkSku = baseSku.replace('26UN-', '26MK-');
+          components = [
+            { skuId: baseSku, skuName: baseSku, qty: 1 },
+            { skuId: mkSku, skuName: mkSku, qty: 1 },
+          ];
+        }
+
+        let canMark = true;
+        const missingComponents: MarkingAnalysisResult['missingComponents'] = [];
+
+        for (const comp of components) {
+          const needed = comp.qty * order.quantity;
+          const available = availablePool[comp.skuId] || 0;
+          if (available < needed) {
+            canMark = false;
+            missingComponents.push({ skuId: comp.skuId, skuName: comp.skuName, needed, available });
+          }
+        }
+
+        if (canMark) {
+          // 재고 차감
+          for (const comp of components) {
+            availablePool[comp.skuId] = (availablePool[comp.skuId] || 0) - comp.qty * order.quantity;
+          }
+        }
+
+        results.push({
+          orderId: order.id,
+          orderNumber: order.order_number,
+          orderDate: order.order_date || '',
+          skuId: order.sku_id,
+          skuName: order.sku_name || '',
+          optionText: order.option_text || '',
+          quantity: order.quantity,
+          canMark,
+          missingComponents,
+        });
+      }
+
+      const possible = results.filter(r => r.canMark);
+      const shortage = results.filter(r => !r.canMark);
+      setMarkingAnalysis({
+        loading: false,
+        results,
+        summary: {
+          total: results.length,
+          possible: possible.length,
+          shortage: shortage.length,
+          possibleQty: possible.reduce((s, r) => s + r.quantity, 0),
+          shortageQty: shortage.reduce((s, r) => s + r.quantity, 0),
+        },
+        analysisTime: new Date().toLocaleString('ko-KR'),
+      });
+    } catch (err: any) {
+      setMessage({ type: 'error', text: `마킹 분석 실패: ${err.message}` });
+      setMarkingAnalysis({ loading: false, results: null, summary: null, analysisTime: null });
     }
   };
 
@@ -587,7 +870,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         <h2 className="font-semibold text-gray-900 mb-3 flex items-center gap-2">
           <FileUp size={18} /> 주문 엑셀 업로드
         </h2>
-        <p className="text-sm text-gray-500 mb-3">FulfillmentShipping 배송대기 엑셀을 업로드하면 신규 주문을 자동 등록합니다.</p>
+        <p className="text-sm text-gray-500 mb-3">FulfillmentShipping 엑셀을 업로드하면 배송상태별 자동 분류됩니다. (배송대기→신규등록, 배송준비중/중/완료→자동출고완료, 진행중→스킵)</p>
         <button
           onClick={() => fileInputRef.current?.click()}
           className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm hover:bg-indigo-700 flex items-center gap-2"
@@ -602,29 +885,45 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5 mb-5 space-y-4">
           <h2 className="font-semibold text-gray-900">업로드 미리보기</h2>
 
-          {/* 요약 카드 */}
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+          {/* 요약 카드 — 분류 결과 */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div className="bg-gray-50 rounded-lg p-3 text-center">
-              <p className="text-xs text-gray-500">전체</p>
+              <p className="text-xs text-gray-500">엑셀 전체</p>
               <p className="text-lg font-bold">{parseSummary.total}</p>
             </div>
             <div className="bg-blue-50 rounded-lg p-3 text-center">
               <p className="text-xs text-blue-600">신규 등록</p>
               <p className="text-lg font-bold text-blue-700">{newOrders.length}</p>
             </div>
-            <div className="bg-gray-50 rounded-lg p-3 text-center">
-              <p className="text-xs text-gray-500">중복 제외</p>
-              <p className="text-lg font-bold text-gray-400">{dupCount}</p>
-            </div>
-            <div className="bg-purple-50 rounded-lg p-3 text-center">
-              <p className="text-xs text-purple-600">마킹 필요</p>
-              <p className="text-lg font-bold text-purple-700">{newOrders.filter(o => o.needsMarking).length}</p>
-            </div>
             <div className="bg-green-50 rounded-lg p-3 text-center">
-              <p className="text-xs text-green-600">오프라인 출고</p>
-              <p className="text-lg font-bold text-green-700">{newOrders.filter(o => o.needsOfflineShipment).length}</p>
+              <p className="text-xs text-green-600">자동 출고완료</p>
+              <p className="text-lg font-bold text-green-700">{autoCompleteOrders.length}</p>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3 text-center">
+              <p className="text-xs text-gray-500">진행중/중복</p>
+              <p className="text-lg font-bold text-gray-400">{skipCount}</p>
             </div>
           </div>
+          {/* 역보정 + 추가 정보 */}
+          {(revertOrders.length > 0 || newOrders.filter(o => o.needsMarking).length > 0) && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {revertOrders.length > 0 && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-center">
+                  <p className="text-xs text-amber-600">⚠ 역보정 (출고완료→신규)</p>
+                  <p className="text-lg font-bold text-amber-700">{revertOrders.length}</p>
+                  <p className="text-[10px] text-amber-500">배송대기인데 출고완료로 잘못된 건</p>
+                </div>
+              )}
+              <div className="bg-purple-50 rounded-lg p-3 text-center">
+                <p className="text-xs text-purple-600">마킹 필요</p>
+                <p className="text-lg font-bold text-purple-700">{newOrders.filter(o => o.needsMarking).length}</p>
+              </div>
+              <div className="bg-orange-50 rounded-lg p-3 text-center">
+                <p className="text-xs text-orange-600">물류센터 처리</p>
+                <p className="text-lg font-bold text-orange-700">{(parsed || []).filter(o => ['배송준비중', '배송중', '배송완료'].includes(o.deliveryStatus)).length}</p>
+              </div>
+            </div>
+          )}
 
           {/* 재고 부족 알림 */}
           {shortageItems.length > 0 && (
@@ -700,13 +999,19 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           <div className="flex gap-2">
             <button
               onClick={handleSave}
-              disabled={saving || newOrders.length === 0}
+              disabled={saving || (newOrders.length === 0 && autoCompleteOrders.length === 0 && revertOrders.length === 0)}
               className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:bg-gray-300"
             >
-              {saving ? '저장 중...' : `${newOrders.length}건 등록`}
+              {saving ? '저장 중...' : (() => {
+                const parts = [];
+                if (newOrders.length > 0) parts.push(`신규 ${newOrders.length}`);
+                if (autoCompleteOrders.length > 0) parts.push(`자동완료 ${autoCompleteOrders.length}`);
+                if (revertOrders.length > 0) parts.push(`역보정 ${revertOrders.length}`);
+                return `처리 (${parts.join(' + ')}건)`;
+              })()}
             </button>
             <button
-              onClick={() => { setParsed(null); setNewOrders([]); setShortageItems([]); setBomMissing([]); }}
+              onClick={() => { setParsed(null); setNewOrders([]); setAutoCompleteOrders([]); setRevertOrders([]); setSkipCount(0); setShortageItems([]); setBomMissing([]); }}
               disabled={saving}
               className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm hover:bg-gray-200 disabled:opacity-50"
             >
@@ -724,6 +1029,14 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             <span className="text-sm font-normal text-gray-400 ml-1">{totalCount.toLocaleString()}건</span>
           </h2>
           <div className="flex items-center gap-2">
+            <button
+              onClick={analyzeMarkingPossible}
+              disabled={markingAnalysis.loading}
+              className="px-4 py-1.5 bg-purple-600 text-white rounded-lg text-xs font-semibold hover:bg-purple-700 disabled:bg-gray-300 flex items-center gap-1"
+            >
+              <BarChart3 size={13} />
+              {markingAnalysis.loading ? '분석 중...' : '마킹 가능 분석'}
+            </button>
             <button
               onClick={handleCreateWorkOrder}
               disabled={creatingWo || orders.filter(o => o.status === '신규' && !o.work_order_id).length === 0}
@@ -770,6 +1083,109 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
                 className="px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg text-xs hover:bg-gray-200">
                 취소
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* 마킹 가능 주문 분석 결과 */}
+        {markingAnalysis.results !== null && (
+          <div className="mb-4 bg-purple-50 border border-purple-200 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold text-purple-900 flex items-center gap-2">
+                <BarChart3 size={16} /> 마킹 가능 주문 분석
+              </h3>
+              <div className="flex items-center gap-3">
+                <span className="text-[10px] text-purple-400">{markingAnalysis.analysisTime} 기준 (플레이위즈 재고)</span>
+                <button onClick={() => setMarkingAnalysis({ loading: false, results: null, summary: null, analysisTime: null })} className="text-purple-400 hover:text-purple-600"><X size={14} /></button>
+              </div>
+            </div>
+
+            {/* 요약 카드 */}
+            {markingAnalysis.summary && (
+              <div className="grid grid-cols-3 gap-3 mb-3">
+                <div className="bg-white rounded-lg p-3 text-center border border-purple-100">
+                  <p className="text-[10px] text-gray-500">전체 마킹 주문</p>
+                  <p className="text-lg font-bold text-gray-900">{markingAnalysis.summary.total.toLocaleString()}<span className="text-xs font-normal text-gray-400">건</span></p>
+                </div>
+                <div className="bg-green-50 rounded-lg p-3 text-center border border-green-200">
+                  <p className="text-[10px] text-green-600">마킹 가능</p>
+                  <p className="text-lg font-bold text-green-700">{markingAnalysis.summary.possible.toLocaleString()}<span className="text-xs font-normal text-green-400">건</span></p>
+                  <p className="text-[10px] text-green-500">{markingAnalysis.summary.possibleQty}개</p>
+                </div>
+                <div className="bg-red-50 rounded-lg p-3 text-center border border-red-200">
+                  <p className="text-[10px] text-red-600">재고 부족</p>
+                  <p className="text-lg font-bold text-red-700">{markingAnalysis.summary.shortage.toLocaleString()}<span className="text-xs font-normal text-red-400">건</span></p>
+                  <p className="text-[10px] text-red-500">{markingAnalysis.summary.shortageQty}개</p>
+                </div>
+              </div>
+            )}
+
+            {/* 부족 구성품 요약 */}
+            {markingAnalysis.results.some(r => !r.canMark) && (() => {
+              const shortageMap: Record<string, { skuName: string; totalShort: number }> = {};
+              for (const r of markingAnalysis.results!) {
+                for (const m of r.missingComponents) {
+                  if (!shortageMap[m.skuId]) shortageMap[m.skuId] = { skuName: m.skuName, totalShort: 0 };
+                  shortageMap[m.skuId].totalShort += (m.needed - m.available);
+                }
+              }
+              const sorted = Object.entries(shortageMap).sort((a, b) => b[1].totalShort - a[1].totalShort);
+              return (
+                <div className="mb-3 bg-white rounded-lg p-3 border border-red-100">
+                  <p className="text-xs font-semibold text-red-800 mb-1">부족 구성품 TOP {Math.min(sorted.length, 10)}</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-1 text-[11px]">
+                    {sorted.slice(0, 10).map(([skuId, v]) => (
+                      <div key={skuId} className="flex justify-between bg-red-50 px-2 py-1 rounded">
+                        <span className="text-gray-700 truncate mr-2" title={v.skuName}>{skuId.includes('MK') ? '🏷️' : '👕'} {v.skuName.length > 20 ? v.skuName.slice(0, 20) + '...' : v.skuName}</span>
+                        <span className="text-red-600 font-semibold whitespace-nowrap">-{v.totalShort}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* 주문 목록 (가능→부족 순) */}
+            <div className="max-h-[400px] overflow-y-auto bg-white rounded-lg border border-purple-100">
+              <table className="w-full text-[11px]">
+                <thead className="sticky top-0 bg-purple-100">
+                  <tr>
+                    <th className="px-2 py-1.5 text-left">주문일시</th>
+                    <th className="px-2 py-1.5 text-left">주문번호</th>
+                    <th className="px-2 py-1.5 text-left">SKU</th>
+                    <th className="px-2 py-1.5 text-left">옵션</th>
+                    <th className="px-2 py-1.5 text-right">수량</th>
+                    <th className="px-2 py-1.5 text-center">상태</th>
+                    <th className="px-2 py-1.5 text-left">부족 구성품</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {markingAnalysis.results.slice(0, 300).map((r) => (
+                    <tr key={r.orderId} className={`border-t ${r.canMark ? 'bg-green-50/30' : 'bg-red-50/30'}`}>
+                      <td className="px-2 py-1 text-gray-500 whitespace-nowrap">{r.orderDate ? r.orderDate.slice(0, 16).replace('T', ' ') : '-'}</td>
+                      <td className="px-2 py-1 font-mono text-gray-600">{r.orderNumber}</td>
+                      <td className="px-2 py-1 font-mono text-gray-500" title={r.skuName}>{r.skuId.length > 25 ? r.skuId.slice(0, 25) + '...' : r.skuId}</td>
+                      <td className="px-2 py-1 text-gray-500">{r.optionText}</td>
+                      <td className="px-2 py-1 text-right">{r.quantity}</td>
+                      <td className="px-2 py-1 text-center">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${r.canMark ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                          {r.canMark ? '가능' : '부족'}
+                        </span>
+                      </td>
+                      <td className="px-2 py-1 text-red-600">
+                        {r.missingComponents.map(m => (
+                          <span key={m.skuId} className="mr-1" title={m.skuName}>
+                            {m.skuId.includes('MK') ? '🏷️' : '👕'}{m.available}/{m.needed}
+                          </span>
+                        ))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {markingAnalysis.results.length > 300 && (
+                <p className="text-center text-[10px] text-gray-400 py-1">상위 300건 표시 (전체 {markingAnalysis.results.length}건)</p>
+              )}
             </div>
           </div>
         )}
