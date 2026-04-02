@@ -49,6 +49,8 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
   // 마킹: 작업일 필터
   const [markingSessions, setMarkingSessions] = useState<{ date: string; totalQty: number }[]>([]);
   const [selectedMarkingDate, setSelectedMarkingDate] = useState<string | null>(null); // null = 전체
+  // 출고 탭: 마킹 완성품 / 단품
+  const [activeTab, setActiveTab] = useState<'marking' | 'direct'>('direct');
 
   // 이력 조회
   const today = new Date().toISOString().split('T')[0];
@@ -902,296 +904,180 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         )}
       </div>
 
-      {/* STEP 3 확인 안내 */}
-      <div className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded-xl p-3">
-        <Info size={16} className="text-blue-600 flex-shrink-0 mt-0.5" />
-        <p className="text-sm text-blue-800">
-          관리자에게 <strong>STEP 3 양식</strong>이 BERRIZ에 업로드되었는지 확인 후 진행하세요.
-        </p>
-      </div>
-
-      {/* 엑셀 버튼 */}
-      <div className="flex gap-2">
+      {/* ── 탭 전환 ── */}
+      <div className="flex bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <button
-          onClick={handleDownloadTemplate}
-          className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50 transition-colors"
+          onClick={() => setActiveTab('direct')}
+          className={`flex-1 py-3 text-sm font-semibold transition-colors ${activeTab === 'direct' ? 'bg-emerald-600 text-white' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
         >
-          <Download size={15} />
-          양식 다운로드
+          📦 단품 출고 ({directItems.length}종 / {totalDirectAvailable}개)
         </button>
         <button
-          onClick={() => fileInputRef.current?.click()}
-          className="flex items-center gap-1.5 px-3 py-2 text-sm border border-emerald-300 rounded-lg text-emerald-600 hover:bg-emerald-50 transition-colors"
+          onClick={() => setActiveTab('marking')}
+          className={`flex-1 py-3 text-sm font-semibold transition-colors ${activeTab === 'marking' ? 'bg-purple-600 text-white' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
         >
-          <FileUp size={15} />
-          엑셀 업로드
+          🏷️ 마킹 완성품 ({markingItems.length}종 / {totalMarkingAvailable}개)
         </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".xlsx,.xls,.csv"
-          className="hidden"
-          onChange={handleExcelUpload}
-        />
       </div>
 
-      {/* 엑셀 파싱 에러 */}
-      {xlsxError && (
-        <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">
-          <AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" />
-          <p className="text-sm text-red-800">{xlsxError}</p>
-        </div>
-      )}
-
-      {/* 업로드 비교 패널 */}
-      {uploadComparison && (
-        <ComparisonPanel
-          rows={uploadComparison.rows}
-          unmatched={uploadComparison.unmatched}
-          onClose={() => setUploadComparison(null)}
-        />
-      )}
-
-      {/* 품목 카드 — 완성품/단품 2컬럼 */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-        <div className="px-5 py-4 border-b border-gray-50">
-          <div className="flex items-center justify-between">
-            <div>
-              <h3 className="font-medium text-gray-900">CJ 물류센터로 보낼 물량</h3>
-              <p className="text-sm text-gray-500 mt-0.5">{selectedWo?.download_date} 기준</p>
-            </div>
+      {/* ── 단품 출고 탭 ── */}
+      {activeTab === 'direct' && (
+        <>
+          {/* 차수 필터 */}
+          {receiptWaves.length > 1 && (
             <div className="flex gap-2">
-              {receiptWaves.length > 1 && (
-                <select
-                  value={selectedWave ?? 'all'}
-                  onChange={async (e) => {
-                    const val = e.target.value;
-                    const wave = val === 'all' ? null : Number(val);
-                    setSelectedWave(wave);
-                    if (selectedWo) {
-                      setItems([]); setUploadComparison(null);
-                      setTimeout(() => { if (selectedWo) selectOrder(selectedWo); }, 0);
-                    }
-                  }}
-                  className="text-xs border border-emerald-300 rounded-lg px-2 py-1.5 bg-white text-emerald-700"
-                >
-                  <option value="all">단품: 전체</option>
-                  {receiptWaves.map((w) => (
-                    <option key={w.wave} value={w.wave}>
-                      단품: {w.wave}차 ({w.date})
-                    </option>
-                  ))}
-                </select>
-              )}
-              {markingSessions.length > 0 && (
-                <select
-                  value={selectedMarkingDate ?? 'all'}
-                  onChange={async (e) => {
-                    const val = e.target.value;
-                    setSelectedMarkingDate(val === 'all' ? null : val);
-                    if (selectedWo) {
-                      setItems([]); setUploadComparison(null);
-                      setTimeout(() => { if (selectedWo) selectOrder(selectedWo); }, 0);
-                    }
-                  }}
-                  className="text-xs border border-purple-300 rounded-lg px-2 py-1.5 bg-white text-purple-700"
-                >
-                  <option value="all">마킹: 전체</option>
-                  {markingSessions.map((s) => (
-                    <option key={s.date} value={s.date}>
-                      마킹: {s.date} ({s.totalQty}개)
-                    </option>
-                  ))}
-                </select>
-              )}
+              <select
+                value={selectedWave ?? 'all'}
+                onChange={async (e) => {
+                  const val = e.target.value;
+                  setSelectedWave(val === 'all' ? null : Number(val));
+                  if (selectedWo) { setItems([]); setUploadComparison(null); setTimeout(() => selectOrder(selectedWo), 0); }
+                }}
+                className="w-full text-sm border border-emerald-300 rounded-lg px-3 py-2 bg-white text-emerald-700"
+              >
+                <option value="all">전체 입고 차수</option>
+                {receiptWaves.map((w) => (
+                  <option key={w.wave} value={w.wave}>{w.wave}차 입고 ({w.date}) — {w.totalQty}개</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* 엑셀 버튼 */}
+          <div className="flex gap-2">
+            <button onClick={handleDownloadTemplate} className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50"><Download size={15} />양식 다운로드</button>
+            <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1.5 px-3 py-2 text-sm border border-emerald-300 rounded-lg text-emerald-600 hover:bg-emerald-50"><FileUp size={15} />엑셀 업로드</button>
+            <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleExcelUpload} />
+          </div>
+
+          {xlsxError && (<div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3"><AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" /><p className="text-sm text-red-800">{xlsxError}</p></div>)}
+          {uploadComparison && (<ComparisonPanel rows={uploadComparison.rows} unmatched={uploadComparison.unmatched} onClose={() => setUploadComparison(null)} />)}
+
+          {/* 단품 목록 */}
+          <div className="bg-white rounded-xl shadow-sm border border-emerald-200 overflow-hidden">
+            <div className="px-5 py-3 bg-emerald-50 border-b border-emerald-200 flex justify-between items-center">
+              <p className="text-sm font-semibold text-emerald-800">단품 출고 (예정 / 실적)</p>
+              <p className="text-sm font-bold text-emerald-900">{totalDirectAvailable}개 / <span className={totalDirectQty !== totalDirectAvailable ? 'text-orange-600' : ''}>{totalDirectQty}개</span></p>
+            </div>
+            <div className="divide-y divide-gray-50">
+              {directItems.length === 0 ? (
+                <div className="px-5 py-8 text-center text-gray-400 text-sm">단품 출고 대상이 없습니다</div>
+              ) : directItems.map((item) => (
+                <div key={item.finishedSkuId} className="px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1 min-w-0 mr-3">
+                      <p className="text-sm font-medium text-gray-800 truncate">{item.skuName}</p>
+                      <p className="text-xs text-gray-400 font-mono">{item.finishedSkuId}</p>
+                      <p className="text-xs text-emerald-600 mt-0.5">예정 {item.availableQty} · 재고 {item.inventoryQty ?? 0}</p>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <input type="number" min="0" value={item.shipQty}
+                        onChange={(e) => handleShipQtyChange(item.finishedSkuId, Number(e.target.value))}
+                        className="w-20 border border-gray-300 rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+                      <span className="text-xs text-gray-400">개</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
-        </div>
 
-        {/* 총 수량 합계 (예정 / 실적) */}
-        <div className="px-5 py-3 bg-emerald-50/60 border-b border-gray-100 space-y-1">
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-purple-700">마킹 완성품 소계 (예정 / 실적)</span>
-            <span className="font-semibold text-purple-800">
-              {totalMarkingAvailable}개 / <span className={totalMarkingQty !== totalMarkingAvailable ? 'text-orange-600' : ''}>{totalMarkingQty}개</span>
-            </span>
-          </div>
-          <div className="flex items-center justify-between text-sm">
-            <span className="text-emerald-700">단품 소계 (예정 / 실적)</span>
-            <span className="font-semibold text-emerald-800">
-              {totalDirectAvailable}개 / <span className={totalDirectQty !== totalDirectAvailable ? 'text-orange-600' : ''}>{totalDirectQty}개</span>
-            </span>
-          </div>
-          <div className="border-t border-emerald-200 pt-1 mt-1 flex items-center justify-between text-sm">
-            <span className="font-bold text-gray-800">총 출고 수량 (예정 / 실적)</span>
-            <span className="font-bold text-gray-900 text-base">
-              {totalMarkingAvailable + totalDirectAvailable}개 / <span className={totalShipQty !== (totalMarkingAvailable + totalDirectAvailable) ? 'text-orange-600' : ''}>{totalShipQty}개</span>
-            </span>
-          </div>
-        </div>
+          <button onClick={handleConfirm} disabled={confirming || directItems.length === 0 || totalDirectQty === 0}
+            className="w-full bg-emerald-600 text-white py-3.5 rounded-xl font-semibold hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 text-base">
+            <Truck size={20} />{confirming ? '처리 중...' : `단품 출고 확인 (${totalDirectQty}개)`}
+          </button>
+        </>
+      )}
 
-        {hasShortage && (
-          <div className="mx-4 mt-4 flex items-start gap-2 bg-yellow-50 border border-yellow-200 rounded-lg p-3">
-            <AlertTriangle size={16} className="text-yellow-600 flex-shrink-0 mt-0.5" />
-            <p className="text-sm text-yellow-800">
-              일부 품목 재고가 부족합니다. 실제 출고 수량을 직접 입력해주세요.
-            </p>
-          </div>
-        )}
+      {/* ── 마킹 완성품 탭 ── */}
+      {activeTab === 'marking' && (
+        <>
+          {/* 작업일 필터 */}
+          {markingSessions.length > 0 && (
+            <div className="flex gap-2">
+              <select
+                value={selectedMarkingDate ?? 'all'}
+                onChange={async (e) => {
+                  const val = e.target.value;
+                  setSelectedMarkingDate(val === 'all' ? null : val);
+                  if (selectedWo) { setItems([]); setUploadComparison(null); setTimeout(() => selectOrder(selectedWo), 0); }
+                }}
+                className="w-full text-sm border border-purple-300 rounded-lg px-3 py-2 bg-white text-purple-700"
+              >
+                <option value="all">전체 마킹 작업</option>
+                {markingSessions.map((s) => (
+                  <option key={s.date} value={s.date}>{s.date} 마킹 ({s.totalQty}개)</option>
+                ))}
+              </select>
+            </div>
+          )}
 
-        {/* 2컬럼 헤더 */}
-        <div className="grid grid-cols-2 border-b border-gray-100">
-          <div className="px-4 py-2.5 border-r border-gray-100 bg-purple-50">
-            <p className="text-xs font-semibold text-purple-700">
-              마킹 완성품{' '}
-              <span className="font-normal text-purple-500">
-                ({markingItems.length}종)
-              </span>
-            </p>
+          {/* STEP 3 안내 */}
+          <div className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded-xl p-3">
+            <Info size={16} className="text-blue-600 flex-shrink-0 mt-0.5" />
+            <p className="text-sm text-blue-800">관리자에게 <strong>STEP 3 양식</strong>이 BERRIZ에 업로드되었는지 확인 후 진행하세요.</p>
           </div>
-          <div className="px-4 py-2.5 bg-emerald-50">
-            <p className="text-xs font-semibold text-emerald-700">
-              단품{' '}
-              <span className="font-normal text-emerald-500">
-                ({directItems.length}종)
-              </span>
-            </p>
-          </div>
-        </div>
 
-        {/* 2컬럼 아이템 목록 */}
-        <div className="grid grid-cols-2">
-          {/* 왼쪽: 마킹 완성품 */}
-          <div className="border-r border-gray-100 divide-y divide-gray-50">
-            {markingItems.length === 0 ? (
-              <div className="px-3 py-6 text-center text-xs text-gray-400">해당 없음</div>
-            ) : (
-              markingItems.map((item) => (
-                <div
-                  key={item.finishedSkuId}
-                  className={`px-3 py-3 ${item.isShortage ? 'bg-red-50' : ''}`}
-                >
-                  <p className="text-xs font-medium text-gray-800 leading-tight truncate">{item.skuName}</p>
-                  <p className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">{item.finishedSkuId}</p>
-                  <div className="flex items-center justify-between mt-1.5 gap-1">
-                    <div>
-                      <p className="text-[10px] text-gray-400">마킹완료 {item.availableQty}</p>
-                      {item.inventoryQty === null ? (
-                        <p className="text-[10px] text-gray-300">재고 미등록</p>
-                      ) : item.isShortage ? (
-                        <p className="text-[10px] text-red-500">재고 {item.inventoryQty}</p>
-                      ) : (
-                        <p className="text-[10px] text-gray-400">재고 {item.inventoryQty}</p>
-                      )}
+          {/* 엑셀 버튼 */}
+          <div className="flex gap-2">
+            <button onClick={handleDownloadTemplate} className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 rounded-lg text-gray-600 hover:bg-gray-50"><Download size={15} />양식 다운로드</button>
+            <button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1.5 px-3 py-2 text-sm border border-purple-300 rounded-lg text-purple-600 hover:bg-purple-50"><FileUp size={15} />엑셀 업로드</button>
+            <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleExcelUpload} />
+          </div>
+
+          {xlsxError && (<div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3"><AlertTriangle size={16} className="text-red-600 flex-shrink-0 mt-0.5" /><p className="text-sm text-red-800">{xlsxError}</p></div>)}
+          {uploadComparison && (<ComparisonPanel rows={uploadComparison.rows} unmatched={uploadComparison.unmatched} onClose={() => setUploadComparison(null)} />)}
+
+          {/* 마킹 완성품 목록 */}
+          <div className="bg-white rounded-xl shadow-sm border border-purple-200 overflow-hidden">
+            <div className="px-5 py-3 bg-purple-50 border-b border-purple-200 flex justify-between items-center">
+              <p className="text-sm font-semibold text-purple-800">마킹 완성품 출고 (예정 / 실적)</p>
+              <p className="text-sm font-bold text-purple-900">{totalMarkingAvailable}개 / <span className={totalMarkingQty !== totalMarkingAvailable ? 'text-orange-600' : ''}>{totalMarkingQty}개</span></p>
+            </div>
+            <div className="divide-y divide-gray-50">
+              {markingItems.length === 0 ? (
+                <div className="px-5 py-8 text-center text-gray-400 text-sm">마킹 완성품 출고 대상이 없습니다</div>
+              ) : markingItems.map((item) => (
+                <div key={item.finishedSkuId} className="px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1 min-w-0 mr-3">
+                      <p className="text-sm font-medium text-gray-800 truncate">{item.skuName}</p>
+                      <p className="text-xs text-gray-400 font-mono">{item.finishedSkuId}</p>
+                      <p className="text-xs text-purple-600 mt-0.5">예정 {item.availableQty} · 재고 {item.inventoryQty ?? 0}</p>
                     </div>
-                    <div className="flex items-center gap-0.5">
-                      <input
-                        type="number"
-                        min="0"
-                        value={item.shipQty}
+                    <div className="flex items-center gap-1">
+                      <input type="number" min="0" value={item.shipQty}
                         onChange={(e) => handleShipQtyChange(item.finishedSkuId, Number(e.target.value))}
-                        className={`w-16 border rounded-lg px-1.5 py-1 text-xs text-right focus:outline-none focus:ring-2 focus:ring-purple-500 ${
-                          item.inventoryQty !== null && item.shipQty > item.inventoryQty
-                            ? 'border-orange-300 bg-orange-50'
-                            : 'border-gray-300'
-                        }`}
-                      />
-                      <span className="text-[10px] text-gray-400">개</span>
+                        className="w-20 border border-gray-300 rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-purple-500" />
+                      <span className="text-xs text-gray-400">개</span>
                     </div>
                   </div>
                 </div>
-              ))
-            )}
+              ))}
+            </div>
           </div>
 
-          {/* 오른쪽: 단품 */}
-          <div className="divide-y divide-gray-50">
-            {directItems.length === 0 ? (
-              <div className="px-3 py-6 text-center text-xs text-gray-400">해당 없음</div>
-            ) : (
-              directItems.map((item) => (
-                <div
-                  key={item.finishedSkuId}
-                  className={`px-3 py-3 ${item.isShortage ? 'bg-red-50' : ''}`}
-                >
-                  <p className="text-xs font-medium text-gray-800 leading-tight truncate">{item.skuName}</p>
-                  <p className="text-[10px] text-gray-400 font-mono mt-0.5 truncate">{item.finishedSkuId}</p>
-                  <div className="flex items-center justify-between mt-1.5 gap-1">
-                    <div>
-                      <p className="text-[10px] text-gray-400">입고확인 {item.availableQty}</p>
-                      {item.inventoryQty === null ? (
-                        <p className="text-[10px] text-gray-300">재고 미등록</p>
-                      ) : item.isShortage ? (
-                        <p className="text-[10px] text-red-500">재고 {item.inventoryQty}</p>
-                      ) : (
-                        <p className="text-[10px] text-gray-400">재고 {item.inventoryQty}</p>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-0.5">
-                      <input
-                        type="number"
-                        min="0"
-                        value={item.shipQty}
-                        onChange={(e) => handleShipQtyChange(item.finishedSkuId, Number(e.target.value))}
-                        className={`w-16 border rounded-lg px-1.5 py-1 text-xs text-right focus:outline-none focus:ring-2 focus:ring-emerald-500 ${
-                          item.inventoryQty !== null && item.shipQty > item.inventoryQty
-                            ? 'border-orange-300 bg-orange-50'
-                            : 'border-gray-300'
-                        }`}
-                      />
-                      <span className="text-[10px] text-gray-400">개</span>
-                    </div>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      </div>
+          <button onClick={handleConfirm} disabled={confirming || markingItems.length === 0 || totalMarkingQty === 0}
+            className="w-full bg-purple-600 text-white py-3.5 rounded-xl font-semibold hover:bg-purple-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 text-base">
+            <Truck size={20} />{confirming ? '처리 중...' : `마킹 완성품 출고 확인 (${totalMarkingQty}개)`}
+          </button>
+        </>
+      )}
 
       {/* 진행 표시 */}
       {confirming && (
-        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 space-y-3">
-          <p className="text-sm text-emerald-700 font-medium text-center">
-            {confirmProgress?.step ?? '처리 중...'}
-          </p>
+        <div className={`${activeTab === 'marking' ? 'bg-purple-50 border-purple-200' : 'bg-emerald-50 border-emerald-200'} border rounded-xl p-4 space-y-3`}>
+          <p className={`text-sm font-medium text-center ${activeTab === 'marking' ? 'text-purple-700' : 'text-emerald-700'}`}>{confirmProgress?.step ?? '처리 중...'}</p>
           {confirmProgress && (
             <>
-              <div className="w-full bg-emerald-200 rounded-full h-2.5 overflow-hidden">
-                <div
-                  className="bg-emerald-600 h-2.5 rounded-full transition-all duration-300"
-                  style={{ width: `${Math.round((confirmProgress.current / confirmProgress.total) * 100)}%` }}
-                />
+              <div className={`w-full ${activeTab === 'marking' ? 'bg-purple-200' : 'bg-emerald-200'} rounded-full h-2.5 overflow-hidden`}>
+                <div className={`${activeTab === 'marking' ? 'bg-purple-600' : 'bg-emerald-600'} h-2.5 rounded-full transition-all duration-300`}
+                  style={{ width: `${Math.round((confirmProgress.current / confirmProgress.total) * 100)}%` }} />
               </div>
-              <p className="text-xs text-emerald-500 text-center">
-                {confirmProgress.current} / {confirmProgress.total}
-                ({Math.round((confirmProgress.current / confirmProgress.total) * 100)}%)
-              </p>
+              <p className={`text-xs text-center ${activeTab === 'marking' ? 'text-purple-500' : 'text-emerald-500'}`}>{confirmProgress.current} / {confirmProgress.total}</p>
             </>
           )}
         </div>
-      )}
-
-      <button
-        onClick={handleConfirm}
-        disabled={confirming || items.length === 0 || !isShipmentReady}
-        className="w-full bg-emerald-600 text-white py-3.5 rounded-xl font-semibold hover:bg-emerald-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 text-base"
-      >
-        <Truck size={20} />
-        {confirming ? '처리 중...' : isMarkingDone ? '출고 완료 확인' : '마킹 완료분 출고'}
-      </button>
-      {!isShipmentReady ? (
-        <p className="text-xs text-center text-amber-600">
-          마킹 작업이 시작되면 출고할 수 있습니다
-        </p>
-      ) : !isMarkingDone ? (
-        <p className="text-xs text-center text-blue-600">
-          마킹 완료된 수량만 출고됩니다
-        </p>
-      ) : (
-        <p className="text-xs text-center text-gray-400">
-          버튼 클릭 시 CJ 물류센터로 출고 처리됩니다
-        </p>
       )}
       </>}
     </div>
