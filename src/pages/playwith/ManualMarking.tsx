@@ -1,9 +1,9 @@
 import { useState, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
-import { supabaseAdmin } from '../../lib/supabaseAdmin';
+// supabaseAdmin은 현재 미사용
 import { recordTransactionBatch } from '../../lib/inventoryTransaction';
 import type { RecordTxParams } from '../../lib/inventoryTransaction';
-import { parseQtyExcel, generateTemplate } from '../../lib/excelUtils';
+// excelUtils는 수기 탭에서 직접 XLSX 파싱 사용
 import type { AppUser } from '../../types';
 import { AlertTriangle, CheckCircle, FileUp, Search, Hammer } from 'lucide-react';
 
