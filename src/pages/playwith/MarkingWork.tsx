@@ -10,6 +10,7 @@ import ComparisonPanel, { type ComparisonRow } from '../../components/Comparison
 import { TableSkeleton } from '../../components/LoadingSkeleton';
 import { notifySlack } from '../../lib/slackNotify';
 import type { AppUser } from '../../types';
+import ManualMarking from './ManualMarking';
 import {
   AlertTriangle,
   CheckCircle,
@@ -91,6 +92,7 @@ interface MergedMarkingItem {
 
 export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   const isStale = useStaleGuard();
+  const [markingTab, setMarkingTab] = useState<'auto' | 'manual'>('auto');
   const [orders, setOrders] = useState<ActiveOrder[]>([]);
   const [selectedOrder, setSelectedOrder] = useState<ActiveOrder | null>(null);
   const [items, setItems] = useState<MarkingItem[]>([]);
@@ -1439,12 +1441,19 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     );
   }
 
-  if (orders.length === 0) {
+  if (orders.length === 0 && markingTab === 'auto') {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-center">
-          <CheckCircle size={48} className="mx-auto text-green-500 mb-3" />
-          <p className="text-gray-600 font-medium">작업할 마킹 물량이 없습니다</p>
+      <div className="space-y-5 max-w-3xl">
+        {/* 탭은 항상 보여줌 */}
+        <div className="flex bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+          <button onClick={() => setMarkingTab('auto')} className={`flex-1 py-3 text-sm font-semibold transition-colors ${markingTab === 'auto' ? 'bg-purple-600 text-white' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}>🏷️ 작업지시서 기반</button>
+          <button onClick={() => setMarkingTab('manual')} className={`flex-1 py-3 text-sm font-semibold transition-colors ${markingTab === 'manual' ? 'bg-indigo-600 text-white' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}>✏️ 수기 마킹</button>
+        </div>
+        <div className="flex items-center justify-center h-64">
+          <div className="text-center">
+            <CheckCircle size={48} className="mx-auto text-green-500 mb-3" />
+            <p className="text-gray-600 font-medium">작업할 마킹 물량이 없습니다</p>
+          </div>
         </div>
       </div>
     );
@@ -1454,6 +1463,29 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
 
   return (
     <div className="space-y-5 max-w-3xl">
+      {/* 탭 전환: 작업지시서 / 수기 */}
+      <div className="flex bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+        <button
+          onClick={() => setMarkingTab('auto')}
+          className={`flex-1 py-3 text-sm font-semibold transition-colors ${markingTab === 'auto' ? 'bg-purple-600 text-white' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
+        >
+          🏷️ 작업지시서 기반
+        </button>
+        <button
+          onClick={() => setMarkingTab('manual')}
+          className={`flex-1 py-3 text-sm font-semibold transition-colors ${markingTab === 'manual' ? 'bg-indigo-600 text-white' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
+        >
+          ✏️ 수기 마킹
+        </button>
+      </div>
+
+      {/* 수기 마킹 탭 */}
+      {markingTab === 'manual' && (
+        <ManualMarking currentUser={currentUser} />
+      )}
+
+      {/* 작업지시서 기반 탭 */}
+      {markingTab === 'auto' && (<>
       {/* 데이터 갱신 중 표시 */}
       {loading && orders.length > 0 && (
         <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center gap-2">
@@ -2037,6 +2069,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           </button>
         </div>
       )}
+      </>)}
     </div>
   );
 }
