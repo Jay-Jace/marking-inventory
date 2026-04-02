@@ -224,16 +224,20 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
 
       // ── A. 단품: 입고 차수 필터 ──
       if (selectedWave !== null) {
-        // 특정 차수의 발송 이력에서 단품(needsMarking=false)만 추출
-        const targetShipLog = ((shipLogResult.data || []) as any[])
+        // 특정 차수의 **입고 이력**에서 단품(needsMarking=false)만 추출
+        const targetRecLog = ((recLogResult.data || []) as any[])
           .find((l: any) => l.summary?.wave === selectedWave);
-        if (targetShipLog) {
-          for (const item of (targetShipLog.summary?.items || []) as any[]) {
-            if (item.needsMarking !== false || !item.skuId || !item.sentQty) continue;
+        if (targetRecLog) {
+          for (const item of (targetRecLog.summary?.items || []) as any[]) {
+            // needsMarking 정보가 있으면 사용, 없으면 발송 이력에서 추정
+            const nm = item.needsMarking ?? directShipmentQty[item.skuId] !== undefined;
+            if (nm !== false || !item.skuId || !(item.actualQty > 0)) continue;
+            const qty = item.actualQty;
             const info = skuNameMap[item.skuId];
+            if (itemMap[item.skuId]) { itemMap[item.skuId].availableQty += qty; continue; }
             itemMap[item.skuId] = {
-              finishedSkuId: item.skuId, skuName: info?.name || item.skuId, barcode: info?.barcode || null,
-              availableQty: item.sentQty, shipQty: 0, inventoryQty: invDirect[item.skuId] || 0,
+              finishedSkuId: item.skuId, skuName: info?.name || item.skuName || item.skuId, barcode: info?.barcode || null,
+              availableQty: qty, shipQty: 0, inventoryQty: invDirect[item.skuId] || 0,
               isShortage: false, needsMarking: false,
             };
           }
@@ -579,7 +583,7 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
     }
   };
 
-  if (loading) {
+  if (loading && items.length === 0 && workOrders.length === 0) {
     return (
       <div className="space-y-6">
         <h2 className="text-xl font-bold text-gray-900">출고 확인</h2>
@@ -746,6 +750,13 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
 
   return (
     <div className="space-y-5 max-w-lg">
+      {/* 데이터 갱신 중 표시 */}
+      {loading && (items.length > 0 || workOrders.length > 0) && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-blue-700">데이터 갱신 중...</span>
+        </div>
+      )}
       {/* 에러 */}
       {error && (
         <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">

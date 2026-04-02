@@ -322,7 +322,15 @@ export default function Progress() {
         </select>
       </div>
 
-      {loading ? (
+      {/* 데이터 갱신 중 표시 */}
+      {loading && skuRows.length > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-blue-700">데이터 갱신 중...</span>
+        </div>
+      )}
+
+      {loading && skuRows.length === 0 ? (
         <div className="flex items-center justify-center py-20 text-gray-400">데이터 로드 중...</div>
       ) : (
         <>

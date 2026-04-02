@@ -307,7 +307,15 @@ export default function BOMManage() {
         </div>
       )}
 
-      {loading ? (
+      {/* 데이터 갱신 중 표시 */}
+      {loading && boms.length > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-blue-700">데이터 갱신 중...</span>
+        </div>
+      )}
+
+      {loading && boms.length === 0 ? (
         <div className="text-center text-gray-400 py-8">불러오는 중...</div>
       ) : Object.keys(grouped).length === 0 ? (
         <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-12 text-center">

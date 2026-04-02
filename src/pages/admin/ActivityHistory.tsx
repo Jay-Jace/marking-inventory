@@ -254,9 +254,17 @@ export default function ActivityHistory() {
         </button>
       </div>
 
+      {/* 데이터 갱신 중 표시 */}
+      {loading && logs.length > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-blue-700">데이터 갱신 중...</span>
+        </div>
+      )}
+
       {/* 결과 */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-        {loading ? (
+        {loading && logs.length === 0 ? (
           <div className="px-5 py-12 text-center text-gray-400 text-sm">불러오는 중...</div>
         ) : logs.length === 0 ? (
           <div className="px-5 py-12 text-center text-gray-400 text-sm">

@@ -1575,7 +1575,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
 
   // ── 렌더링 ──
 
-  if (loading) {
+  if (loading && items.length === 0 && workOrders.length === 0) {
     return (
       <div className="space-y-6">
         <h2 className="text-xl font-bold text-gray-900">발송 확인</h2>
@@ -1941,6 +1941,13 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
 
   return (
     <div className="space-y-5 max-w-3xl">
+      {/* 데이터 갱신 중 표시 */}
+      {loading && (items.length > 0 || workOrders.length > 0) && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-blue-700">데이터 갱신 중...</span>
+        </div>
+      )}
       {/* 에러 */}
       {error && (
         <div className="flex items-start gap-2 bg-red-50 border border-red-200 rounded-xl p-3">

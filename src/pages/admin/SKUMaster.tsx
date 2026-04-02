@@ -664,6 +664,14 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
         </div>
       )}
 
+      {/* 데이터 갱신 중 표시 */}
+      {loading && skus.length > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center gap-2 mb-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-blue-700">데이터 갱신 중...</span>
+        </div>
+      )}
+
       {/* 결과 수 */}
       <p className="text-sm text-gray-500 mb-2">
         검색 결과: {filtered.length.toLocaleString()}건
@@ -683,7 +691,7 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
               </tr>
             </thead>
             <tbody>
-              {loading ? (
+              {loading && skus.length === 0 ? (
                 <tr><td colSpan={5} className="px-4 py-12 text-center text-gray-400">불러오는 중...</td></tr>
               ) : filtered.length === 0 ? (
                 <tr><td colSpan={5} className="px-4 py-12 text-center text-gray-400">검색 결과가 없습니다</td></tr>

@@ -584,8 +584,16 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
         />
       </div>
 
+      {/* 데이터 갱신 중 표시 */}
+      {loading && rows.length > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-blue-700">데이터 갱신 중...</span>
+        </div>
+      )}
+
       {/* 테이블 */}
-      {loading ? (
+      {loading && rows.length === 0 ? (
         <div className="flex items-center justify-center h-40 text-gray-400">불러오는 중...</div>
       ) : filtered.length === 0 ? (
         <div className="bg-white rounded-xl p-8 text-center text-gray-400 shadow-sm border border-gray-100">

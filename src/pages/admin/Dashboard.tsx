@@ -537,7 +537,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
     출고완료: 'bg-emerald-100 text-emerald-700',
   };
 
-  if (loading) {
+  if (loading && activeOrders.length === 0) {
     return (
       <div className="space-y-6">
         <h2 className="text-xl font-bold text-gray-900">대시보드</h2>
@@ -549,6 +549,14 @@ export default function Dashboard({ currentUser }: DashboardProps) {
   return (
     <div className="space-y-6">
       <h2 className="text-xl font-bold text-gray-900">대시보드</h2>
+
+      {/* 데이터 갱신 중 표시 */}
+      {loading && activeOrders.length > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-blue-700">데이터 갱신 중...</span>
+        </div>
+      )}
 
       {/* 성공 메시지 */}
       {successMsg && (

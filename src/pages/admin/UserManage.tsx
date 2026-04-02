@@ -387,9 +387,17 @@ export default function UserManage({ currentUserId }: Props) {
         </div>
       )}
 
+      {/* 데이터 갱신 중 표시 */}
+      {loading && users.length > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-blue-700">데이터 갱신 중...</span>
+        </div>
+      )}
+
       {/* 사용자 목록 */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-        {loading ? (
+        {loading && users.length === 0 ? (
           <div className="text-center py-12 text-gray-400 text-sm">로딩 중...</div>
         ) : users.length === 0 ? (
           <div className="text-center py-12 text-gray-400 text-sm">등록된 계정이 없습니다.</div>

@@ -1056,6 +1056,14 @@ export default function StockLedger() {
         )}
       </div>
 
+      {/* 데이터 갱신 중 표시 */}
+      {loading && rows.length > 0 && (
+        <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2 flex items-center gap-2">
+          <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+          <span className="text-sm text-blue-700">데이터 갱신 중...</span>
+        </div>
+      )}
+
       {/* 수불부 테이블 */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
         <div className="overflow-x-auto">
@@ -1079,7 +1087,7 @@ export default function StockLedger() {
               </tr>
             </thead>
             <tbody>
-              {loading ? (
+              {loading && rows.length === 0 ? (
                 <tr><td colSpan={14} className="px-3 py-8 text-center text-gray-400">조회 중...</td></tr>
               ) : error ? (
                 <tr><td colSpan={14} className="px-3 py-8 text-center text-red-500">{error}</td></tr>
