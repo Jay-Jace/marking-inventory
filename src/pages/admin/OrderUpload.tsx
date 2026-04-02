@@ -225,7 +225,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         .select('sku_id, quantity')
         .eq('warehouse_id', wh.id)
         .in('sku_id', batch);
-      if (inv) for (const r of inv) invMap[r.sku_id] = r.quantity;
+      if (inv) for (const r of inv) invMap[r.sku_id] = (invMap[r.sku_id] || 0) + r.quantity;
     }
 
     const shortages: typeof shortageItems = [];
@@ -491,7 +491,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         while (true) {
           const { data: inv } = await supabaseAdmin.from('inventory').select('sku_id, quantity').eq('warehouse_id', whId).range(offset, offset + 999);
           if (!inv || inv.length === 0) break;
-          for (const r of inv) invMap[r.sku_id] = r.quantity;
+          for (const r of inv) invMap[r.sku_id] = (invMap[r.sku_id] || 0) + r.quantity;
           if (inv.length < 1000) break;
           offset += 1000;
         }
@@ -739,7 +739,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         while (true) {
           const { data: inv } = await supabaseAdmin.from('inventory').select('sku_id, quantity').eq('warehouse_id', pwWh.id).range(offset, offset + 999);
           if (!inv || inv.length === 0) break;
-          for (const r of inv) pwInvMap[r.sku_id] = r.quantity;
+          for (const r of inv) pwInvMap[r.sku_id] = (pwInvMap[r.sku_id] || 0) + r.quantity;
           if (inv.length < 1000) break;
           offset += 1000;
         }

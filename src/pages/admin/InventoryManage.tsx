@@ -12,6 +12,7 @@ import {
 
 interface InventoryRow {
   sku_id: string;
+  needs_marking: boolean;
   quantity: number;
   sku: { sku_name: string; barcode: string | null } | null;
 }
@@ -81,7 +82,7 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
 
       const { data, error: invErr } = await supabase
         .from('inventory')
-        .select('sku_id, quantity, sku(sku_name, barcode)')
+        .select('sku_id, needs_marking, quantity, sku(sku_name, barcode)')
         .eq('warehouse_id', wh.id)
         .gt('quantity', 0)
         .order('sku_id');
@@ -90,6 +91,7 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
       setRows(
         ((data || []) as any[]).map((r) => ({
           sku_id: r.sku_id,
+          needs_marking: r.needs_marking ?? false,
           quantity: r.quantity,
           sku: Array.isArray(r.sku) ? r.sku[0] || null : r.sku,
         }))
@@ -142,7 +144,8 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
         .from('inventory')
         .update({ quantity: editQty })
         .eq('warehouse_id', warehouseId)
-        .eq('sku_id', row.sku_id);
+        .eq('sku_id', row.sku_id)
+        .eq('needs_marking', row.needs_marking);
       if (updErr) throw updErr;
 
       const diff = editQty - row.quantity;
@@ -175,8 +178,8 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
 
       setRows((prev) =>
         editQty === 0
-          ? prev.filter((r) => r.sku_id !== row.sku_id)
-          : prev.map((r) => (r.sku_id === row.sku_id ? { ...r, quantity: editQty } : r))
+          ? prev.filter((r) => !(r.sku_id === row.sku_id && r.needs_marking === row.needs_marking))
+          : prev.map((r) => (r.sku_id === row.sku_id && r.needs_marking === row.needs_marking ? { ...r, quantity: editQty } : r))
       );
       setEditingSkuId(null);
       setSuccessMsg(`${row.sku?.sku_name || row.sku_id}: ${row.quantity} → ${editQty}개로 변경됨`);
@@ -238,12 +241,15 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
         if (s.barcode) skuByBarcode.set(s.barcode, s);
       }
 
-      // 현재 재고 조회
+      // 현재 재고 조회 (needs_marking 전체 합산)
       const { data: currentInv } = await supabase
         .from('inventory')
         .select('sku_id, quantity')
         .eq('warehouse_id', warehouseId);
-      const currentQtyMap = new Map((currentInv || []).map((r) => [r.sku_id, r.quantity as number]));
+      const currentQtyMap = new Map<string, number>();
+      for (const r of (currentInv || []) as any[]) {
+        currentQtyMap.set(r.sku_id, (currentQtyMap.get(r.sku_id) || 0) + (r.quantity as number));
+      }
 
       // 엑셀 데이터 매칭
       const items: ParsedStockItem[] = [];
@@ -301,16 +307,17 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
       for (let i = 0; i < changedItems.length; i += 50) {
         const batch = changedItems.slice(i, i + 50);
 
-        // inventory upsert
+        // inventory upsert (needs_marking=false for base stock)
         const upsertRows = batch.map((item) => ({
           warehouse_id: warehouseId,
           sku_id: item.skuId!,
+          needs_marking: false,
           quantity: item.newQty,
         }));
 
         const { error: upsertErr } = await supabaseAdmin
           .from('inventory')
-          .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id' });
+          .upsert(upsertRows, { onConflict: 'warehouse_id,sku_id,needs_marking' });
         if (upsertErr) throw upsertErr;
 
         // 수불부 트랜잭션 기록
@@ -594,15 +601,23 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
                 <tr>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">SKU ID</th>
                   <th className="text-left px-4 py-3 font-medium text-gray-600">상품명</th>
+                  <th className="text-center px-4 py-3 font-medium text-gray-600">구분</th>
                   <th className="text-right px-4 py-3 font-medium text-gray-600">수량</th>
                   <th className="px-4 py-3 w-24" />
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {filtered.map((row) => (
-                  <tr key={row.sku_id} className="hover:bg-gray-50">
+                  <tr key={`${row.sku_id}_${row.needs_marking}`} className="hover:bg-gray-50">
                     <td className="px-4 py-3 text-gray-600 font-mono text-xs">{row.sku_id}</td>
                     <td className="px-4 py-3 text-gray-900">{row.sku?.sku_name || '-'}</td>
+                    <td className="px-4 py-3 text-center">
+                      {row.needs_marking ? (
+                        <span className="inline-block px-2 py-0.5 text-xs font-medium rounded-full bg-purple-100 text-purple-700">마킹</span>
+                      ) : (
+                        <span className="inline-block px-2 py-0.5 text-xs font-medium rounded-full bg-gray-100 text-gray-600">일반</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-right">
                       {editingSkuId === row.sku_id ? (
                         <input

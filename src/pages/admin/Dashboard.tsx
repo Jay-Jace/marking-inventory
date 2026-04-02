@@ -315,6 +315,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
               .select('quantity')
               .eq('warehouse_id', wh.id)
               .eq('sku_id', item.skuId)
+              .eq('needs_marking', false)
               .single();
 
             if (inv) {
@@ -322,11 +323,12 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                 .from('inventory')
                 .update({ quantity: inv.quantity + item.qty })
                 .eq('warehouse_id', wh.id)
-                .eq('sku_id', item.skuId);
+                .eq('sku_id', item.skuId)
+                .eq('needs_marking', false);
             } else {
               await supabase
                 .from('inventory')
-                .insert({ warehouse_id: wh.id, sku_id: item.skuId, quantity: item.qty });
+                .insert({ warehouse_id: wh.id, sku_id: item.skuId, needs_marking: false, quantity: item.qty });
             }
           }
         }
@@ -388,6 +390,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
             .select('quantity')
             .eq('warehouse_id', wh.id)
             .eq('sku_id', modItem.skuId)
+            .eq('needs_marking', false)
             .single();
 
           if (inv) {
@@ -396,7 +399,8 @@ export default function Dashboard({ currentUser }: DashboardProps) {
               .from('inventory')
               .update({ quantity: newQty })
               .eq('warehouse_id', wh.id)
-              .eq('sku_id', modItem.skuId);
+              .eq('sku_id', modItem.skuId)
+              .eq('needs_marking', false);
           }
         }
 

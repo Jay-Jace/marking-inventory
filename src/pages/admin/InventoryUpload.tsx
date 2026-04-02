@@ -94,7 +94,7 @@ export default function InventoryUpload() {
       // 2. 파일에 포함된 창고 목록 확인
       const affectedWarehouses = [...new Set(result.rows.map((r) => r.warehouseName))];
 
-      // 3. Q2→B: 해당 창고 기존 재고 전체 초기화
+      // 3. Q2→B: 해당 창고 기존 재고 전체 초기화 (needs_marking=false 행만)
       setSaveProgress({ current: 2, total: 5, step: '기존 재고 초기화 중...' });
       for (const whName of affectedWarehouses) {
         const whId = warehouseMap[whName];
@@ -102,7 +102,8 @@ export default function InventoryUpload() {
         const { error: clearErr } = await supabase
           .from('inventory')
           .update({ quantity: 0 })
-          .eq('warehouse_id', whId);
+          .eq('warehouse_id', whId)
+          .eq('needs_marking', false);
         if (clearErr) throw clearErr;
       }
 
@@ -131,6 +132,7 @@ export default function InventoryUpload() {
         .map((r) => ({
           warehouse_id: warehouseMap[r.warehouseName],
           sku_id: r.skuId,
+          needs_marking: false,
           quantity: r.qty,
         }));
 
@@ -145,7 +147,7 @@ export default function InventoryUpload() {
         const chunk = inventoryRows.slice(i, i + 500);
         const { error: invErr } = await supabase
           .from('inventory')
-          .upsert(chunk, { onConflict: 'warehouse_id,sku_id' });
+          .upsert(chunk, { onConflict: 'warehouse_id,sku_id,needs_marking' });
         if (invErr) throw invErr;
       }
 

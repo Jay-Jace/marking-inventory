@@ -886,11 +886,11 @@ export async function deleteWorkOrderCompletely(
       for (const [key, entry] of reverseDelta) {
         const [whId, skuId] = key.split('|');
         const { data: inv } = await supabaseAdmin.from('inventory')
-          .select('quantity').eq('warehouse_id', whId).eq('sku_id', skuId).maybeSingle();
+          .select('quantity').eq('warehouse_id', whId).eq('sku_id', skuId).eq('needs_marking', false).maybeSingle();
         const newQty = Math.max(0, ((inv as any)?.quantity || 0) + entry.delta);
         await supabaseAdmin.from('inventory').upsert(
-          { warehouse_id: whId, sku_id: skuId, quantity: newQty },
-          { onConflict: 'warehouse_id,sku_id' }
+          { warehouse_id: whId, sku_id: skuId, needs_marking: false, quantity: newQty },
+          { onConflict: 'warehouse_id,sku_id,needs_marking' }
         );
       }
 

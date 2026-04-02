@@ -1197,7 +1197,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           .eq('warehouse_id', pwWhId);
         const invMap: Record<string, number> = {};
         for (const inv of (currentInv || []) as any[]) {
-          invMap[inv.sku_id] = inv.quantity;
+          invMap[inv.sku_id] = (invMap[inv.sku_id] || 0) + inv.quantity;
         }
 
         // 미완료 라인 확인 (marked_qty < received_qty)
@@ -1304,32 +1304,36 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           const finSkuId = (lineData as any).finished_sku_id;
           const components = bomMap[finSkuId] || [];
 
-          // 구성품 재고 복원 (입고)
+          // 구성품 재고 복원 (입고) - 마킹 구성품이므로 needs_marking=true
           for (const comp of components) {
+            const isMarkingComp = comp.componentSkuId.includes('MK');
+            const needsMarking = isMarkingComp;
             const deltaQty = comp.quantity * qty;
             const { data: compInv } = await supabase
               .from('inventory')
               .select('quantity')
               .eq('warehouse_id', pwWhId)
               .eq('sku_id', comp.componentSkuId)
+              .eq('needs_marking', needsMarking)
               .maybeSingle();
             const newQty = ((compInv as any)?.quantity || 0) + deltaQty;
             await supabase
               .from('inventory')
-              .upsert({ warehouse_id: pwWhId, sku_id: comp.componentSkuId, quantity: newQty }, { onConflict: 'warehouse_id,sku_id' });
+              .upsert({ warehouse_id: pwWhId, sku_id: comp.componentSkuId, needs_marking: needsMarking, quantity: newQty }, { onConflict: 'warehouse_id,sku_id,needs_marking' });
           }
 
-          // 완성품 재고 차감 (출고)
+          // 완성품 재고 차감 (출고) - 완성품은 needs_marking=false
           const { data: finInv } = await supabase
             .from('inventory')
             .select('quantity')
             .eq('warehouse_id', pwWhId)
             .eq('sku_id', finSkuId)
+            .eq('needs_marking', false)
             .maybeSingle();
           const newFinQty = Math.max(0, ((finInv as any)?.quantity || 0) - qty);
           await supabase
             .from('inventory')
-            .upsert({ warehouse_id: pwWhId, sku_id: finSkuId, quantity: newFinQty }, { onConflict: 'warehouse_id,sku_id' });
+            .upsert({ warehouse_id: pwWhId, sku_id: finSkuId, needs_marking: false, quantity: newFinQty }, { onConflict: 'warehouse_id,sku_id,needs_marking' });
         }
 
         // 4) 관련 inventory_transaction 삭제 (구성품 출고 + 완성품 입고)
