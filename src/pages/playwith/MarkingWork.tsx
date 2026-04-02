@@ -1441,13 +1441,12 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     );
   }
 
-  if (orders.length === 0 && markingTab === 'auto') {
+  if (orders.length === 0 && markingTab !== 'manual') {
     return (
       <div className="space-y-5 max-w-3xl">
-        {/* 탭은 항상 보여줌 */}
         <div className="flex bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-          <button onClick={() => setMarkingTab('auto')} className={`flex-1 py-3 text-sm font-semibold transition-colors ${markingTab === 'auto' ? 'bg-purple-600 text-white' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}>🏷️ 작업지시서 기반</button>
-          <button onClick={() => setMarkingTab('manual')} className={`flex-1 py-3 text-sm font-semibold transition-colors ${markingTab === 'manual' ? 'bg-indigo-600 text-white' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}>✏️ 수기 마킹</button>
+          <button onClick={() => setMarkingTab('auto')} className="flex-1 py-3 text-sm font-semibold bg-purple-600 text-white">🏷️ 작업지시서 기반</button>
+          <button onClick={() => setMarkingTab('manual')} className="flex-1 py-3 text-sm font-semibold bg-gray-50 text-gray-500 hover:bg-gray-100">✏️ 수기 마킹</button>
         </div>
         <div className="flex items-center justify-center h-64">
           <div className="text-center">

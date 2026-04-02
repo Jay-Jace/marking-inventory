@@ -36,10 +36,7 @@ export default function ManualMarking({ currentUser }: { currentUser: AppUser })
     setSaved(false);
 
     try {
-      // 1. 엑셀 파싱 (SKU ID + 수량)
-      // 빈 items로 파싱하면 전부 unmatched → 수동으로 처리
-      const result = await parseQtyExcel(file, []);
-      // unmatched에 SKU ID가 들어옴 → 별도 파싱 필요
+      // 1. 엑셀 파싱 — 직접 XLSX로 SKU + 수량 추출
       // 직접 XLSX 파싱
       const XLSX = await import('xlsx');
       const buf = await file.arrayBuffer();
