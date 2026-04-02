@@ -89,11 +89,11 @@ export default function ManualMarking({ currentUser }: { currentUser: AppUser })
 
       let invMap: Record<string, number> = {};
       if (wh && compSkuArr.length > 0) {
+        // 구성품 재고: needs_marking 구분 없이 전체 합산 (수기 마킹은 모든 재고 활용 가능)
         const { data: inv } = await supabase
           .from('inventory')
-          .select('sku_id, quantity, needs_marking')
+          .select('sku_id, quantity')
           .eq('warehouse_id', (wh as any).id)
-          .eq('needs_marking', true)
           .in('sku_id', compSkuArr);
         for (const i of (inv || []) as any[]) {
           invMap[i.sku_id] = (invMap[i.sku_id] || 0) + i.quantity;
