@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef } from 'react';
 
 /**
  * 페이지 로딩 안전장치 — loading이 지정 시간(기본 15초) 이상 지속되면
