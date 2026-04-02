@@ -27,6 +27,7 @@ import TxHistory from './pages/admin/TxHistory';
 import SKUMaster from './pages/admin/SKUMaster';
 import OrderUpload from './pages/admin/OrderUpload';
 import Progress from './pages/admin/Progress';
+import MarkingRequest from './pages/admin/MarkingRequest';
 import type { UserRole, AppUser } from './types';
 
 function AppContent() {
@@ -207,6 +208,7 @@ function AppContent() {
         <Route path="/admin/sku-master" element={<SKUMaster currentUserId={user.id} />} />
         <Route path="/admin/orders" element={<OrderUpload currentUserId={user.id} />} />
         <Route path="/admin/progress" element={<Progress />} />
+        <Route path="/admin/marking-request" element={<MarkingRequest currentUser={user} />} />
 
         {/* 오프라인 매장 */}
         <Route path="/offline/shipment" element={<ShipmentConfirm currentUser={user} />} />

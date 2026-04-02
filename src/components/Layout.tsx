@@ -60,6 +60,7 @@ const navGroups: NavGroup[] = [
       { label: '주문 관리', path: '/admin/orders', icon: <ShoppingCart size={18} />, roles: ['admin'] },
       { label: '작업지시서 업로드', path: '/admin/workorder', icon: <Upload size={18} />, roles: ['admin'] },
       { label: '양식 다운로드', path: '/admin/downloads', icon: <Download size={18} />, roles: ['admin'] },
+      { label: '수기 마킹 요청', path: '/admin/marking-request', icon: <ClipboardList size={18} />, roles: ['admin'] },
     ],
   },
   {
