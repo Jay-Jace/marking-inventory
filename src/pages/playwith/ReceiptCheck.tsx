@@ -6,7 +6,7 @@ import { notifySlack } from '../../lib/slackNotify';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, FileUp, Trash2 } from 'lucide-react';
-import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
+import { generateTemplate, parseQtyExcel, buildMatchKey } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import type { AppUser } from '../../types';
 import { TwoColumnSkeleton } from '../../components/LoadingSkeleton';
@@ -399,23 +399,24 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
     try {
       const result = await parseQtyExcel(
         file,
-        items.map((item) => ({ skuId: item.skuId, skuName: item.skuName, barcode: item.barcode }))
+        items.map((item) => ({ skuId: item.skuId, skuName: item.skuName, barcode: item.barcode, needsMarking: item.needsMarking }))
       );
 
-      // actualQty 일괄 업데이트
-      const matchMap = new Map(result.matched.map((m) => [m.skuId, m.uploadedQty]));
+      // actualQty 일괄 업데이트 (matchKey 기준 — 같은 SKU라도 마킹예정/단품출고 구분)
+      const matchMap = new Map(result.matched.map((m) => [m.matchKey, m.uploadedQty]));
       setItems((prev) =>
-        prev.map((item) =>
-          matchMap.has(item.skuId) ? { ...item, actualQty: matchMap.get(item.skuId)! } : item
-        )
+        prev.map((item) => {
+          const key = buildMatchKey(item.skuId, item.needsMarking);
+          return matchMap.has(key) ? { ...item, actualQty: matchMap.get(key)! } : item;
+        })
       );
 
       // 비교 데이터 구성
       const rows: ComparisonRow[] = result.matched.map((m) => {
-        const item = items.find((i) => i.skuId === m.skuId);
+        const item = items.find((i) => buildMatchKey(i.skuId, i.needsMarking) === m.matchKey);
         return {
-          skuId: m.skuId,
-          skuName: item?.skuName || m.skuId,
+          skuId: m.matchKey,
+          skuName: (item?.skuName || m.skuId) + (item ? (item.needsMarking ? ' [마킹예정]' : ' [단품출고]') : ''),
           expected: item?.expectedQty ?? 0,
           uploaded: m.uploadedQty,
           diff: m.uploadedQty - (item?.expectedQty ?? 0),
