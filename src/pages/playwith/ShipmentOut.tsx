@@ -470,23 +470,35 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       const totalSteps = Math.ceil(activeItems.length / BATCH) + 3;
       let step = 1;
 
-      // 1. 상태 업데이트 (마킹완료→출고완료, 마킹중→유지)
+      // 1. 상태 업데이트
       setConfirmProgress({ current: step, total: totalSteps, step: '출고 상태 업데이트 중...' });
-      if (selectedWo.status === '마킹완료') {
-        const { error: statusErr } = await supabase
-          .from('work_order')
-          .update({ status: '출고완료' })
-          .eq('id', selectedWo.id);
-        if (statusErr) throw statusErr;
+      if (selectedWo.status === '마킹완료' || selectedWo.status === '마킹중') {
+        // 마킹중일 때: 플레이위즈 재고가 남아있는지 확인하여 전량출고 판단
+        let shouldComplete = selectedWo.status === '마킹완료';
+        if (selectedWo.status === '마킹중') {
+          // 현재 출고 수량 반영 후 잔량 확인
+          const remainAfterShip = items.some(i => {
+            const avail = i.availableQty - i.shipQty;
+            return avail > 0;
+          });
+          shouldComplete = !remainAfterShip; // 잔량 없으면 전량출고
+        }
 
-        // 연결된 온라인 주문도 출고완료로 변경
-        await supabase
-          .from('online_order')
-          .update({ status: '출고완료' })
-          .eq('work_order_id', selectedWo.id)
-          .in('status', ['발송대기', '이관중', '마킹중']);
+        if (shouldComplete) {
+          const { error: statusErr } = await supabase
+            .from('work_order')
+            .update({ status: '출고완료' })
+            .eq('id', selectedWo.id);
+          if (statusErr) throw statusErr;
+
+          // 연결된 온라인 주문도 출고완료로 변경
+          await supabase
+            .from('online_order')
+            .update({ status: '출고완료' })
+            .eq('work_order_id', selectedWo.id)
+            .in('status', ['발송대기', '이관중', '마킹중']);
+        }
       }
-      // 마킹중 상태는 유지 (부분 출고)
       step++;
 
       // 2. 플레이위즈 창고 조회
