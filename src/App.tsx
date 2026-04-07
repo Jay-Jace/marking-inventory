@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   BrowserRouter,
   Routes,
   Route,
   Navigate,
   useNavigate,
+  useLocation,
 } from 'react-router-dom';
 import { supabase } from './lib/supabase';
 import Layout from './components/Layout';
@@ -36,6 +37,8 @@ function AppContent() {
   const [loading, setLoading] = useState(true);
   const [viewAs, setViewAs] = useState<UserRole | null>(null);
   const navigate = useNavigate();
+  const location = useLocation();
+  const viewChangeRef = useRef(false);
 
   const defaultPaths: Record<UserRole, string> = {
     admin: '/admin/dashboard',
@@ -179,11 +182,18 @@ function AppContent() {
   }
 
   const handleViewAsChange = (role: UserRole | null) => {
+    viewChangeRef.current = true;
     setViewAs(role);
-    if (role === 'offline') navigate('/offline/shipment');
-    else if (role === 'playwith') navigate('/playwith/receipt');
-    else navigate('/admin/dashboard');
   };
+
+  // viewAs 변경 후 navigate (state 업데이트 완료 후 실행 → race condition 방지)
+  useEffect(() => {
+    if (!viewChangeRef.current) return;
+    viewChangeRef.current = false;
+    if (viewAs === 'offline') navigate('/offline/shipment');
+    else if (viewAs === 'playwith') navigate('/playwith/receipt');
+    else navigate('/admin/dashboard');
+  }, [viewAs]);
 
   return (
     <Layout
@@ -192,7 +202,7 @@ function AppContent() {
       viewAs={viewAs}
       onViewAsChange={handleViewAsChange}
     >
-      <Routes>
+      <Routes key={location.pathname}>
         {/* 관리자 */}
         <Route path="/admin/dashboard" element={<Dashboard currentUser={user} />} />
         <Route path="/admin/workorder" element={<WorkOrderUpload />} />
