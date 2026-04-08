@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
+import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import type { AppUser } from '../../types';
 import { AlertTriangle, CheckCircle, FileUp, Search, ClipboardList, Clock, Trash2 } from 'lucide-react';
 
@@ -35,6 +37,9 @@ export default function MarkingRequest({ currentUser }: { currentUser: AppUser }
   const [requests, setRequests] = useState<MarkingRequestRow[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
 
+  const isStale = useStaleGuard();
+  useLoadingTimeout(historyLoading, setHistoryLoading, setError);
+
   useEffect(() => { loadRequests(); }, []);
 
   const loadRequests = async () => {
@@ -45,6 +50,7 @@ export default function MarkingRequest({ currentUser }: { currentUser: AppUser }
         .select('id, request_date, status, items, requested_at, notes')
         .order('requested_at', { ascending: false })
         .limit(20);
+      if (isStale()) return;
       setRequests((data || []) as MarkingRequestRow[]);
     } catch { /* silent */ }
     finally { setHistoryLoading(false); }

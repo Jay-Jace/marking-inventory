@@ -2,6 +2,8 @@ import { useState, useRef, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
 import { recordTransactionBatch } from '../../lib/inventoryTransaction';
 import type { RecordTxParams } from '../../lib/inventoryTransaction';
+import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import type { AppUser } from '../../types';
 import { AlertTriangle, CheckCircle, FileUp, Search, ArrowRight, Package } from 'lucide-react';
 
@@ -22,6 +24,8 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isStale = useStaleGuard();
+  useLoadingTimeout(loading, setLoading, setError);
 
   const today = new Date().toISOString().split('T')[0];
 
@@ -40,6 +44,7 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
         .gt('quantity', 0)
         .order('sku_id');
 
+      if (isStale()) return;
       setItems(
         ((inv || []) as any[]).map((r) => ({
           skuId: r.sku_id,

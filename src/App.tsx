@@ -5,7 +5,7 @@ import {
   Route,
   Navigate,
   useNavigate,
-  useLocation,
+
 } from 'react-router-dom';
 import { supabase } from './lib/supabase';
 import Layout from './components/Layout';
@@ -37,7 +37,6 @@ function AppContent() {
   const [loading, setLoading] = useState(true);
   const [viewAs, setViewAs] = useState<UserRole | null>(null);
   const navigate = useNavigate();
-  const location = useLocation();
   const viewChangeRef = useRef(false);
 
   const defaultPaths: Record<UserRole, string> = {
@@ -202,7 +201,7 @@ function AppContent() {
       viewAs={viewAs}
       onViewAsChange={handleViewAsChange}
     >
-      <Routes key={location.pathname}>
+      <Routes>
         {/* 관리자 */}
         <Route path="/admin/dashboard" element={<Dashboard currentUser={user} />} />
         <Route path="/admin/workorder" element={<WorkOrderUpload />} />
