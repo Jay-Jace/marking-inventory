@@ -472,11 +472,12 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
 
       // 1. 상태 업데이트
       setConfirmProgress({ current: step, total: totalSteps, step: '출고 상태 업데이트 중...' });
+      // 마킹 완료 여부 확인 (WO 라인 기준)
+      let allMarkingDone = false;
       if (selectedWo.status === '마킹완료' || selectedWo.status === '마킹중') {
         // 마킹중일 때: 플레이위즈 재고가 남아있는지 확인하여 전량출고 판단
         let shouldComplete = selectedWo.status === '마킹완료';
         if (selectedWo.status === '마킹중') {
-          // 현재 출고 수량 반영 후 잔량 확인
           const remainAfterShip = items.some(i => {
             const avail = i.availableQty - i.shipQty;
             return avail > 0;
@@ -484,7 +485,17 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
           shouldComplete = !remainAfterShip; // 잔량 없으면 전량출고
         }
 
-        if (shouldComplete) {
+        // WO 라인에서 마킹 완료 여부 확인
+        const { data: woLines } = await supabase
+          .from('work_order_line')
+          .select('needs_marking, marked_qty, ordered_qty')
+          .eq('work_order_id', selectedWo.id);
+        allMarkingDone = ((woLines || []) as any[])
+          .filter(l => l.needs_marking)
+          .every(l => l.marked_qty >= l.ordered_qty);
+
+        if (shouldComplete && allMarkingDone) {
+          // 마킹 완료 + 전량 출고 → 출고완료
           const { error: statusErr } = await supabase
             .from('work_order')
             .update({ status: '출고완료' })
@@ -496,8 +507,9 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
             .from('online_order')
             .update({ status: '출고완료' })
             .eq('work_order_id', selectedWo.id)
-            .in('status', ['발송대기', '이관중', '마킹중']);
+            .in('status', ['발송대기', '이관중', '마킹중', '마킹완료']);
         }
+        // shouldComplete && !allMarkingDone → 출고(재고차감)는 진행하되, 상태는 유지
       }
       step++;
 
@@ -589,14 +601,16 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         user: currentUser.name || currentUser.email,
         date: selectedWo.download_date,
         items: shippedItems.map((i) => ({ name: i.skuName, qty: i.shipQty })),
-        extra: selectedWo.status === '마킹중' ? '_부분 출고 (마킹 진행 중)_' : undefined,
+        extra: !allMarkingDone ? '_출고 처리됨 (마킹 미완료 라인 있음)_' : undefined,
       }).catch((e) => console.warn('[비동기 후처리 실패]', e));
 
-      // 온라인 주문 상태 업데이트: 마킹중 → 출고완료 (FIFO)
-      import('../../lib/onlineOrderSync').then(({ updateOnlineOrderBySkus }) => {
-        const skuIds = shippedItems.map((i) => i.finishedSkuId);
-        updateOnlineOrderBySkus(skuIds, '출고완료', '마킹중').catch((e) => console.warn('[비동기 후처리 실패]', e));
-      });
+      // 온라인 주문 상태 업데이트: 마킹완료 → 출고완료 (마킹 전체 완료 시에만)
+      if (allMarkingDone) {
+        import('../../lib/onlineOrderSync').then(({ updateOnlineOrderBySkus }) => {
+          const skuIds = shippedItems.map((i) => i.finishedSkuId);
+          updateOnlineOrderBySkus(skuIds, '출고완료', '마킹완료').catch((e) => console.warn('[비동기 후처리 실패]', e));
+        });
+      }
     } catch (e: any) {
       setError(`출고 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {

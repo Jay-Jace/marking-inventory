@@ -32,7 +32,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   const [parseSummary, setParseSummary] = useState<any>(null);
   const [newOrders, setNewOrders] = useState<ParsedOrder[]>([]);
   const [autoCompleteOrders, setAutoCompleteOrders] = useState<{ orderNumber: string; skuId: string; id: string }[]>([]); // 자동 출고완료 대상
-  const [revertOrders, setRevertOrders] = useState<{ orderNumber: string; skuId: string; id: string }[]>([]); // 역방향 보정: 출고완료→신규
+  // revertOrders 제거됨: 출고완료/마킹중/마킹완료 주문은 스킵 처리
   const [skipCount, setSkipCount] = useState(0); // 작업 진행중/중복 스킵
   const [saving, setSaving] = useState(false);
   const [saveProgress, setSaveProgress] = useState<{ current: number; total: number } | null>(null);
@@ -167,16 +167,15 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
 
       let skipCnt = 0;
       const newOnes: ParsedOrder[] = [];
-      const revertTargets: typeof revertOrders = [];
       for (const o of casePending) {
         const key = `${o.orderNumber}|${o.skuId}`;
         const existing = existingMap.get(key);
         if (activeWoOrderSet.has(key)) {
           // Case 2: 작업 진행중 → 스킵
           skipCnt++;
-        } else if (existing && existing.status === '출고완료') {
-          // 역방향 보정: 엑셀에서 배송대기인데 우리 시스템에서 출고완료 → 신규로 되돌리기
-          revertTargets.push({ orderNumber: o.orderNumber, skuId: o.skuId, id: existing.id });
+        } else if (existing && ['출고완료', '마킹중', '마킹완료'].includes(existing.status)) {
+          // 출고완료/마킹중/마킹완료 → 스킵 (작업지시서 대상에서 제외)
+          skipCnt++;
         } else if (existing) {
           // 이미 존재 (신규/재고부족 등) → 중복이므로 스킵
           skipCnt++;
@@ -185,7 +184,6 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           newOnes.push(o);
         }
       }
-      setRevertOrders(revertTargets);
 
       setNewOrders(newOnes);
       setSkipCount(skipCnt);
@@ -323,15 +321,14 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
 
   // ── 저장 ──
   const handleSave = async () => {
-    if (newOrders.length === 0 && autoCompleteOrders.length === 0 && revertOrders.length === 0) return;
+    if (newOrders.length === 0 && autoCompleteOrders.length === 0) return;
     setSaving(true);
-    const totalWork = newOrders.length + autoCompleteOrders.length + revertOrders.length;
+    const totalWork = newOrders.length + autoCompleteOrders.length;
     setSaveProgress({ current: 0, total: totalWork });
 
     try {
       let ok = 0;
       let autoOk = 0;
-      let revertOk = 0;
 
       // ── Case 1 처리: 배송준비중/배송중/배송완료 → 출고완료 자동 처리 ──
       if (autoCompleteOrders.length > 0) {
@@ -343,19 +340,6 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             .in('id', ids.slice(i, i + 100));
           autoOk += Math.min(100, ids.length - i);
           setSaveProgress({ current: autoOk, total: totalWork });
-        }
-      }
-
-      // ── 역방향 보정: 출고완료 → 신규 되돌리기 (작업지시서 연결 해제) ──
-      if (revertOrders.length > 0) {
-        const ids = revertOrders.map(o => o.id);
-        for (let i = 0; i < ids.length; i += 100) {
-          await supabaseAdmin
-            .from('online_order')
-            .update({ status: '신규', work_order_id: null })
-            .in('id', ids.slice(i, i + 100));
-          revertOk += Math.min(100, ids.length - i);
-          setSaveProgress({ current: autoOk + revertOk, total: totalWork });
         }
       }
 
@@ -377,7 +361,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           .from('online_order')
           .upsert(batch, { onConflict: 'order_number,sku_id', ignoreDuplicates: true });
         if (!error) ok += batch.length;
-        setSaveProgress({ current: autoOk + revertOk + Math.min(i + 100, newOrders.length), total: totalWork });
+        setSaveProgress({ current: autoOk + Math.min(i + 100, newOrders.length), total: totalWork });
       }
 
       // activity_log
@@ -385,19 +369,17 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         user_id: currentUserId,
         action_type: 'order_upload',
         action_date: new Date().toISOString().split('T')[0],
-        summary: { total: ok, autoComplete: autoOk, reverted: revertOk, skipped: skipCount, marking: newOrders.filter(o => o.needsMarking).length },
+        summary: { total: ok, autoComplete: autoOk, skipped: skipCount, marking: newOrders.filter(o => o.needsMarking).length },
       }).then(() => {});
 
       const parts: string[] = [];
       if (ok > 0) parts.push(`신규 ${ok}건 등록`);
       if (autoOk > 0) parts.push(`출고완료 ${autoOk}건 자동 처리`);
-      if (revertOk > 0) parts.push(`역보정 ${revertOk}건 (출고완료→신규)`);
       if (skipCount > 0) parts.push(`진행중/중복 ${skipCount}건 제외`);
       setMessage({ type: 'success', text: parts.join(' / ') });
       setParsed(null);
       setNewOrders([]);
       setAutoCompleteOrders([]);
-      setRevertOrders([]);
       setSkipCount(0);
       loadDashboard();
     } catch (err: any) {
@@ -1016,16 +998,9 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
               <p className="text-lg font-bold text-gray-400">{skipCount}</p>
             </div>
           </div>
-          {/* 역보정 + 추가 정보 */}
-          {(revertOrders.length > 0 || newOrders.filter(o => o.needsMarking).length > 0) && (
+          {/* 추가 정보 */}
+          {newOrders.filter(o => o.needsMarking).length > 0 && (
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {revertOrders.length > 0 && (
-                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-center">
-                  <p className="text-xs text-amber-600">⚠ 역보정 (출고완료→신규)</p>
-                  <p className="text-lg font-bold text-amber-700">{revertOrders.length}</p>
-                  <p className="text-[10px] text-amber-500">배송대기인데 출고완료로 잘못된 건</p>
-                </div>
-              )}
               <div className="bg-purple-50 rounded-lg p-3 text-center">
                 <p className="text-xs text-purple-600">마킹 필요</p>
                 <p className="text-lg font-bold text-purple-700">{newOrders.filter(o => o.needsMarking).length}</p>
@@ -1111,19 +1086,18 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           <div className="flex gap-2">
             <button
               onClick={handleSave}
-              disabled={saving || (newOrders.length === 0 && autoCompleteOrders.length === 0 && revertOrders.length === 0)}
+              disabled={saving || (newOrders.length === 0 && autoCompleteOrders.length === 0)}
               className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:bg-gray-300"
             >
               {saving ? '저장 중...' : (() => {
                 const parts = [];
                 if (newOrders.length > 0) parts.push(`신규 ${newOrders.length}`);
                 if (autoCompleteOrders.length > 0) parts.push(`자동완료 ${autoCompleteOrders.length}`);
-                if (revertOrders.length > 0) parts.push(`역보정 ${revertOrders.length}`);
                 return `처리 (${parts.join(' + ')}건)`;
               })()}
             </button>
             <button
-              onClick={() => { setParsed(null); setNewOrders([]); setAutoCompleteOrders([]); setRevertOrders([]); setSkipCount(0); setShortageItems([]); setBomMissing([]); }}
+              onClick={() => { setParsed(null); setNewOrders([]); setAutoCompleteOrders([]); setSkipCount(0); setShortageItems([]); setBomMissing([]); }}
               disabled={saving}
               className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm hover:bg-gray-200 disabled:opacity-50"
             >
