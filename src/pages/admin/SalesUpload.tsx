@@ -48,7 +48,11 @@ function isDateLike(val: unknown): boolean {
   if (typeof val === 'string') {
     const s = val.trim();
     if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(s)) return true;
-    if (/^\d{8}$/.test(s)) return true;
+    if (/^\d{8}$/.test(s)) {
+      // 8자리 바코드(예: 88012345)와 구분: 실제 날짜 범위(20000101~20991231)만 허용
+      const num = Number(s);
+      return num >= 20000101 && num <= 20991231;
+    }
   }
   return false;
 }
@@ -86,6 +90,9 @@ export default function SalesUpload() {
 
   // 등록 현황
   const [txStatus, setTxStatus] = useState<{ date: string; txType: string; count: number; totalQty: number }[]>([]);
+
+  // 저장 확인 모달
+  const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
 
   // 삭제 모달
   const [deleteModal, setDeleteModal] = useState<{ date: string; txType: string; count: number } | null>(null);
@@ -317,7 +324,7 @@ export default function SalesUpload() {
           } else if (qty < 0) {
             continue; // 다른 탭에서는 음수 무시
           } else {
-            rows.push({ barcode, quantity: qty, saleDate: rowDate });
+            rows.push({ barcode, quantity: qty, saleDate: rowDate, txType: activeTab });
           }
         }
 
@@ -397,7 +404,7 @@ export default function SalesUpload() {
       const txRows = matched.map((r) => ({
         warehouseId: offlineWarehouse.id,
         skuId: r.skuId!,
-        txType: r.txType || activeTab,
+        txType: r.txType!,
         quantity: r.quantity,
         source: 'offline_manual' as const,
         txDate: r.saleDate || txDate,
@@ -656,7 +663,7 @@ export default function SalesUpload() {
               취소
             </button>
             <button
-              onClick={handleSave}
+              onClick={() => setSaveConfirmOpen(true)}
               disabled={uploading || matchedRows.length === 0}
               className={`bg-${tabColor}-600 text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-${tabColor}-700 disabled:opacity-50`}
             >
@@ -719,6 +726,50 @@ export default function SalesUpload() {
           </div>
         )}
       </div>
+
+      {/* 저장 확인 모달 */}
+      {saveConfirmOpen && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setSaveConfirmOpen(false)}>
+          <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md mx-4" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-gray-900 mb-1">저장 확인</h3>
+            <p className="text-sm text-gray-600 mb-4">
+              아래 내용으로 저장하시겠습니까?
+            </p>
+            <div className={`bg-${tabColor}-50 border border-${tabColor}-200 rounded-xl p-4 mb-4`}>
+              <div className="flex items-center gap-2 mb-2">
+                <span className={`text-xs font-semibold bg-${tabColor}-100 text-${tabColor}-700 px-2 py-1 rounded-full`}>
+                  거래 유형
+                </span>
+                <span className={`text-base font-bold text-${tabColor}-800`}>
+                  {isPosDaily
+                    ? `판매 ${matchedRows.filter((r) => r.saleType !== '반품').length}건 + 반품 ${matchedRows.filter((r) => r.saleType === '반품').length}건`
+                    : activeTabInfo.label}
+                </span>
+              </div>
+              <div className="text-sm text-gray-600">
+                <span className="font-medium">{matchedRows.length}건</span>
+                {isDateColumnFormat && (
+                  <span className="ml-2 text-gray-400">
+                    ({new Set(matchedRows.map(r => r.saleDate).filter(Boolean)).size}일)
+                  </span>
+                )}
+                {!isDateColumnFormat && !isPosDaily && (
+                  <span className="ml-2 text-gray-400">({txDate})</span>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setSaveConfirmOpen(false)} className="px-4 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50">취소</button>
+              <button
+                onClick={() => { setSaveConfirmOpen(false); handleSave(); }}
+                className={`bg-${tabColor}-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-${tabColor}-700`}
+              >
+                저장
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 삭제 모달 */}
       {deleteModal && (
