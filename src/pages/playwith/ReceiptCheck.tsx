@@ -593,7 +593,7 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
             recordTransaction({
               warehouseId: pwWhId,
               skuId: item.skuId,
-              txType: '입고',
+              txType: '이동입고',
               quantity: item.actualQty,
               needsMarking: item.needsMarking,
               source: 'system',
