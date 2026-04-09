@@ -1,5 +1,6 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { getWarehouseId } from '../../lib/warehouseStore';
 import { recordTransaction, deleteSystemTransactions } from '../../lib/inventoryTransaction';
 import { type ProgressCallback } from '../../lib/workOrderRollback';
 import { notifySlack } from '../../lib/slackNotify';
@@ -317,14 +318,10 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
 
       // 3) inventory_transaction 삭제 + inventory 역반영
       onProgress(3, 5, '재고 트랜잭션 삭제 중...');
-      const { data: warehouse } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', '플레이위즈')
-        .maybeSingle();
-      if (warehouse) {
+      const pwWhId2 = await getWarehouseId('플레이위즈');
+      if (pwWhId2) {
         await deleteSystemTransactions({
-          warehouseId: (warehouse as any).id,
+          warehouseId: pwWhId2,
           memo: `입고확인 (작업지시서 ${historyWorkOrder.date})`,
           memoLike: `%입고확인%작업지시서 ${historyWorkOrder.date}%`,
         });
@@ -545,15 +542,9 @@ export default function ReceiptCheck({ currentUser }: { currentUser: AppUser }) 
       // ── 플레이위즈 재고 증가 (배치 병렬) ──
       progressStep++;
       setSaveProgress({ current: progressStep, total: stepsTotal, step: '플레이위즈 창고 조회 중...' });
-      const { data: pwWarehouse, error: pwWhErr } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', '플레이위즈')
-        .maybeSingle();
-      if (pwWhErr) throw pwWhErr;
+      const pwWhId = await getWarehouseId('플레이위즈');
 
-      if (pwWarehouse) {
-        const pwWhId = (pwWarehouse as any).id;
+      if (pwWhId) {
 
         // SKU + needsMarking별 수량 합산 (같은 SKU도 마킹/단순출고 분리)
         const skuQtyMap: Record<string, number> = {};

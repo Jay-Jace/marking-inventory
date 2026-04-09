@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../../lib/supabase';
+import { getWarehouses } from '../../lib/warehouseStore';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { recordTransactionBatch, validateTransactionBatch, deleteCjTransactions, countCjTransactions } from '../../lib/inventoryTransaction';
@@ -75,9 +76,7 @@ export default function StockLedger() {
   const [warehouses, setWarehouses] = useState<{ id: string; name: string }[]>([]);
 
   useEffect(() => {
-    supabase.from('warehouse').select('id, name').then(({ data }) => {
-      if (data) setWarehouses(data);
-    });
+    getWarehouses().then((list) => setWarehouses(list));
   }, []);
 
   // CJ 업로드 현황 조회
@@ -118,7 +117,7 @@ export default function StockLedger() {
     if (warehouses.length > 0) fetchCjStatus();
   }, [fetchCjStatus, warehouses]);
 
-  /** 1,000행 제한 우회: 페이지네이션으로 전체 데이터 조회 */
+  /** 1,000행 제한 우회: 페이지네이션으로 전체 데이터 조회 (순차) */
   const fetchAllTransactions = async (
     from: string, to: string
   ): Promise<{ warehouse_id: string; sku_id: string; tx_type: string; quantity: number }[]> => {
@@ -135,7 +134,7 @@ export default function StockLedger() {
       if (error) throw new Error(`트랜잭션 조회 실패: ${error.message}`);
       if (!data || data.length === 0) break;
       allRows.push(...data);
-      if (data.length < PAGE_SIZE) break; // 마지막 페이지
+      if (data.length < PAGE_SIZE) break;
       offset += PAGE_SIZE;
     }
     return allRows;
@@ -149,12 +148,12 @@ export default function StockLedger() {
       const openingMap: Record<string, number> = {};
       const txMap: Record<string, { in: number; transferIn: number; sales: number; out: number; return: number; adjust: number; markingOut: number; markingIn: number }> = {};
 
-      // 기초/기간내를 각각 페이지네이션 조회 (1,000행 제한 우회)
+      // 기초/기간내를 동시에 병렬 조회
       const prevDay = new Date(new Date(startDate).getTime() - 86400000).toISOString().slice(0, 10);
-      const preTxData = startDate > SYSTEM_START
-        ? await fetchAllTransactions(SYSTEM_START, prevDay)
-        : [];
-      const txData = await fetchAllTransactions(startDate, endDate);
+      const [preTxData, txData] = await Promise.all([
+        startDate > SYSTEM_START ? fetchAllTransactions(SYSTEM_START, prevDay) : Promise.resolve([]),
+        fetchAllTransactions(startDate, endDate),
+      ]);
 
       // ── SKU 정보 먼저 조회 → base_barcode 매핑 생성 ──
       const allTxSkuIds = new Set<string>();
@@ -308,15 +307,13 @@ export default function StockLedger() {
     return true;
   });
 
-  // CJ 창고 조회 헬퍼 (warehouses state가 비어있을 때 직접 조회)
+  // CJ 창고 조회 헬퍼
   const findCjWarehouse = async () => {
     let wh = warehouses.find((w) => w.name.includes('CJ') || w.name.includes('cj'));
     if (!wh) {
-      const { data } = await supabase.from('warehouse').select('id, name');
-      if (data) {
-        setWarehouses(data);
-        wh = data.find((w) => w.name.includes('CJ') || w.name.includes('cj'));
-      }
+      const list = await getWarehouses();
+      setWarehouses(list);
+      wh = list.find((w) => w.name.includes('CJ') || w.name.includes('cj'));
     }
     return wh || null;
   };

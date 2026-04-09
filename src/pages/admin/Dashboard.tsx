@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { supabase } from '../../lib/supabase';
+import { getWarehouseId } from '../../lib/warehouseStore';
 import { Trash2, AlertTriangle, CheckCircle, XCircle, Eye, RotateCcw, Settings } from 'lucide-react';
 import { CardSkeleton } from '../../components/LoadingSkeleton';
 import {
@@ -289,12 +290,9 @@ export default function Dashboard({ currentUser }: DashboardProps) {
     setError(null);
     try {
       // 1. 오프라인샵 창고 ID 조회
-      const { data: wh } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', '오프라인샵')
-        .single();
-      if (!wh) throw new Error('오프라인샵 창고를 찾을 수 없습니다.');
+      const offId = await getWarehouseId('오프라인샵');
+      if (!offId) throw new Error('오프라인샵 창고를 찾을 수 없습니다.');
+      const wh = { id: offId };
 
       // 2. 해당 작업지시서의 발송 기록(shipment_confirm) 조회 → 재고 복구용
       const { data: confirmLog } = await supabase
@@ -372,12 +370,9 @@ export default function Dashboard({ currentUser }: DashboardProps) {
     setError(null);
     try {
       // 1. 오프라인샵 창고 ID 조회
-      const { data: wh } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', '오프라인샵')
-        .single();
-      if (!wh) throw new Error('오프라인샵 창고를 찾을 수 없습니다.');
+      const offId = await getWarehouseId('오프라인샵');
+      if (!offId) throw new Error('오프라인샵 창고를 찾을 수 없습니다.');
+      const wh = { id: offId };
 
       // 2. 수정 항목 반영: 각 SKU별 delta 계산 후 재고 조정
       for (const modItem of requestDetail.items) {

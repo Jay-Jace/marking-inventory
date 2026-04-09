@@ -1,5 +1,6 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { getWarehouseId } from '../../lib/warehouseStore';
 import { recordTransaction, deleteSystemTransactions } from '../../lib/inventoryTransaction';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
@@ -174,8 +175,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       }
 
       // 오프라인 재고 조회 (발송 가능한 수량만 잔량에 포함)
-      const { data: offWh } = await supabase.from('warehouse').select('id').eq('name', '오프라인샵').maybeSingle();
-      const offWhId = (offWh as any)?.id;
+      const offWhId = await getWarehouseId('오프라인샵');
       const offlineInvMap: Record<string, number> = {};
       if (offWhId) {
         const { data: invData } = await supabase.from('inventory').select('sku_id, quantity').eq('warehouse_id', offWhId).eq('needs_marking', false);
@@ -312,14 +312,13 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         supabase.from('work_order_line')
           .select('id, finished_sku_id, ordered_qty, sent_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
           .eq('work_order_id', wo.id),
-        supabase.from('warehouse').select('id').eq('name', '오프라인샵').maybeSingle(),
+        getWarehouseId('오프라인샵'),
       ]);
       if (linesResult.error) throw linesResult.error;
-      if (warehouseResult.error) throw warehouseResult.error;
       if (isStale()) return;
 
       const lines = linesResult.data;
-      const offlineWarehouseId = (warehouseResult.data as any)?.id;
+      const offlineWarehouseId = warehouseResult;
 
       // 2단계: BOM + inventory 병렬 조회 (각각 lines, warehouse 결과 필요)
       const markingSkuIds = ((lines || []) as any[])
@@ -672,14 +671,10 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       }
 
       // 3) inventory_transaction 삭제 + inventory 역반영
-      const { data: warehouse } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', '오프라인샵')
-        .maybeSingle();
-      if (warehouse) {
+      const offWhId2 = await getWarehouseId('오프라인샵');
+      if (offWhId2) {
         await deleteSystemTransactions({
-          warehouseId: (warehouse as any).id,
+          warehouseId: offWhId2,
           memo: `발송확인 (작업지시서 ${historyWorkOrder.date})`,
         });
       }
@@ -1119,10 +1114,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         }
       }
 
-      const { data: warehouse } = await supabase
-        .from('warehouse').select('id').eq('name', '오프라인샵').maybeSingle();
-      if (warehouse) {
-        const whId = (warehouse as any).id;
+      const whId = await getWarehouseId('오프라인샵');
+      if (whId) {
         // 재고 차감은 SKU별 총량으로 1회
         const skuEntries = Object.entries(totalSentBySku);
         const BATCH = 10;
@@ -1374,14 +1367,10 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         batchStep++;
       }
 
-      const { data: warehouse } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', '오프라인샵')
-        .maybeSingle();
+      const offWhId3 = await getWarehouseId('오프라인샵');
 
-      if (warehouse) {
-        const whId = (warehouse as any).id;
+      if (offWhId3) {
+        const whId = offWhId3;
         const activeItems = finalItems.filter((item) => item.sentQty > 0);
         for (let i = 0; i < activeItems.length; i += BATCH) {
           const batch = activeItems.slice(i, i + BATCH);

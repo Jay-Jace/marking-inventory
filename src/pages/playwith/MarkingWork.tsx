@@ -1,5 +1,6 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { getWarehouseId } from '../../lib/warehouseStore';
 import { recordTransactionBatch, deleteSystemTransactions } from '../../lib/inventoryTransaction';
 import type { RecordTxParams } from '../../lib/inventoryTransaction';
 import type { ProgressCallback } from '../../lib/workOrderRollback';
@@ -224,12 +225,8 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
               .select('work_order_line_id, completed_qty, date')
               .in('work_order_line_id', lineIds)
           : Promise.resolve({ data: [] as any[], error: null }),
-        // 플레이위즈 창고 ID 조회
-        supabase
-          .from('warehouse')
-          .select('id')
-          .eq('name', '플레이위즈')
-          .maybeSingle(),
+        // 플레이위즈 창고 ID 조회 (캐시)
+        getWarehouseId('플레이위즈'),
       ]);
 
       if (bomResult.error) throw bomResult.error;
@@ -244,7 +241,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       setBomMap(bMap);
 
       // 플레이위즈 창고의 구성품 재고 조회
-      const pwWhId = (whResult.data as any)?.id;
+      const pwWhId = whResult;
       const allComponentSkuIds = new Set<string>();
       for (const comps of Object.values(bMap)) {
         for (const c of comps) allComponentSkuIds.add(c.componentSkuId);
@@ -595,7 +592,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           .eq('date', today).in('work_order_line_id', affectedLineIds),
         supabase.from('work_order_line').select('id, marked_qty, finished_sku_id, needs_marking, work_order_id')
           .in('id', affectedLineIds),
-        supabase.from('warehouse').select('id').eq('name', '플레이위즈').maybeSingle(),
+        getWarehouseId('플레이위즈'),
       ]);
 
       const existingDmMap = new Map(
@@ -604,7 +601,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       const lineMap = new Map(
         ((lineResult.data || []) as any[]).map((l: any) => [l.id, l])
       );
-      const pwWhId = (whResult.data as any)?.id;
+      const pwWhId = whResult;
 
       // diff 계산
       const diffs = affectedLineIds.map((lineId) => {
@@ -1003,7 +1000,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         lineIds.length > 0
           ? supabase.from('work_order_line').select('id, marked_qty').in('id', lineIds)
           : Promise.resolve({ data: [] as any[], error: null }),
-        supabase.from('warehouse').select('id').eq('name', '플레이위즈').maybeSingle(),
+        getWarehouseId('플레이위즈'),
       ]);
 
       const existingDmMap = new Map(
@@ -1012,7 +1009,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       const lineMap = new Map(
         ((lineResult.data || []) as any[]).map((l: any) => [l.id, l.marked_qty || 0])
       );
-      const pwWhId = (whResult.data as any)?.id;
+      const pwWhId = whResult;
 
       // diff 계산 (메모리에서) — 예정 항목만
       const diffs = regularItems.map((item) => {
@@ -1267,12 +1264,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
     };
     try {
       onProgress(1, totalSteps, '창고 정보 조회 중...');
-      const { data: pwWarehouse } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', '플레이위즈')
-        .maybeSingle();
-      const pwWhId = (pwWarehouse as any)?.id;
+      const pwWhId = await getWarehouseId('플레이위즈');
 
       onProgress(2, totalSteps, '마킹 기록 조회 및 삭제 중...');
       for (const item of deletePreview) {

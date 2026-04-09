@@ -1,5 +1,6 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { getWarehouseId } from '../../lib/warehouseStore';
 import { recordTransaction } from '../../lib/inventoryTransaction';
 import { rollbackShipmentOut, type ProgressCallback } from '../../lib/workOrderRollback';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
@@ -107,18 +108,13 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
           .from('work_order_line')
           .select('id, finished_sku_id, ordered_qty, received_qty, marked_qty, needs_marking, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name, barcode)')
           .eq('work_order_id', wo.id),
-        supabase
-          .from('warehouse')
-          .select('id')
-          .eq('name', '플레이위즈')
-          .maybeSingle(),
+        getWarehouseId('플레이위즈'),
       ]);
       if (linesResult.error) throw linesResult.error;
-      if (warehouseResult.error) throw warehouseResult.error;
       if (isStale()) return;
 
       const lineList = (linesResult.data || []) as any[];
-      const warehouseId = (warehouseResult.data as any)?.id;
+      const warehouseId = warehouseResult;
 
       // 2단계: inventory + 이전 출고 이력 + 발송 이력 + 입고 이력 병렬 조회
       const [inventoryResult, outLogResult, shipLogResult, recLogResult, markingLogResult] = await Promise.all([
@@ -513,13 +509,9 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       }
       step++;
 
-      // 2. 플레이위즈 창고 조회
+      // 2. 플레이위즈 창고 조회 (캐시)
       setConfirmProgress({ current: step, total: totalSteps, step: '창고 정보 조회 중...' });
-      const { data: warehouse } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', '플레이위즈')
-        .maybeSingle();
+      const warehouse = { id: await getWarehouseId('플레이위즈') };
       step++;
 
       // 3. 플레이위즈 재고 차감 (배치 병렬)

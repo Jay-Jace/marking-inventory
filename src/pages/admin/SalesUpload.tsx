@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../../lib/supabase';
+import { getWarehouses } from '../../lib/warehouseStore';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { recordTransactionBatch } from '../../lib/inventoryTransaction';
 import type { TxType } from '../../types';
@@ -99,11 +100,10 @@ export default function SalesUpload() {
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
-  // 창고 조회
+  // 창고 조회 (캐시 우선)
   useEffect(() => {
-    supabase.from('warehouse').select('id, name').then(({ data }) => {
-      if (!data) { setWarehouseLoading(false); return; }
-      const wh = data.find((w) => w.name.includes('오프라인'));
+    getWarehouses().then((list) => {
+      const wh = list.find((w) => w.name.includes('오프라인'));
       if (wh) setOfflineWarehouse(wh);
       setWarehouseLoading(false);
     });

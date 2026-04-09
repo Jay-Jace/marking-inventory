@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { supabase } from '../../lib/supabase';
+import { getWarehouseId } from '../../lib/warehouseStore';
 import { recordTransactionBatch } from '../../lib/inventoryTransaction';
 import type { RecordTxParams } from '../../lib/inventoryTransaction';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
@@ -34,13 +35,13 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
     setLoading(true);
     setError(null);
     try {
-      const { data: wh } = await supabase.from('warehouse').select('id').eq('name', '플레이위즈').maybeSingle();
-      if (!wh) throw new Error('플레이위즈 창고를 찾을 수 없습니다.');
+      const whId = await getWarehouseId('플레이위즈');
+      if (!whId) throw new Error('플레이위즈 창고를 찾을 수 없습니다.');
 
       const { data: inv } = await supabase
         .from('inventory')
         .select('sku_id, quantity, needs_marking, sku(sku_name, barcode)')
-        .eq('warehouse_id', (wh as any).id)
+        .eq('warehouse_id', whId)
         .gt('quantity', 0)
         .order('sku_id');
 
@@ -136,12 +137,11 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
     setSaving(true);
     setError(null);
     try {
-      const { data: pwWh } = await supabase.from('warehouse').select('id').eq('name', '플레이위즈').maybeSingle();
-      const { data: offWh } = await supabase.from('warehouse').select('id').eq('name', '오프라인샵').maybeSingle();
-      if (!pwWh || !offWh) throw new Error('창고 정보를 찾을 수 없습니다.');
-
-      const pwId = (pwWh as any).id;
-      const offId = (offWh as any).id;
+      const [pwId, offId] = await Promise.all([
+        getWarehouseId('플레이위즈'),
+        getWarehouseId('오프라인샵'),
+      ]);
+      if (!pwId || !offId) throw new Error('창고 정보를 찾을 수 없습니다.');
       const txRows: RecordTxParams[] = [];
 
       for (const item of activeItems) {

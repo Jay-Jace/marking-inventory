@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { supabase } from '../../lib/supabase';
+import { getWarehouseId } from '../../lib/warehouseStore';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
+import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { parseOrderExcel } from '../../lib/orderParser';
 import type { ParsedOrder } from '../../lib/orderParser';
 import type { OnlineOrder } from '../../types';
@@ -47,6 +49,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   // 대시보드
   const [orders, setOrders] = useState<OnlineOrder[]>([]);
   const [dashLoading, setDashLoading] = useState(true);
+  useLoadingTimeout(dashLoading, setDashLoading);
   const [statusFilter, setStatusFilter] = useState('전체');
   const [searchText, setSearchText] = useState('');
 
@@ -210,8 +213,9 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     }
 
     // 오프라인 매장 재고 조회
-    const { data: wh } = await supabaseAdmin.from('warehouse').select('id').eq('name', '오프라인샵').single();
-    if (!wh) return;
+    const offId = await getWarehouseId('오프라인샵');
+    if (!offId) return;
+    const wh = { id: offId };
 
     // BOM 조회: 마킹 완제품(26UN-xxx_YYY) → 구성품 전개
     const markingSkuIds = Object.keys(orderDemand).filter(s => s.startsWith('26UN-') && s.includes('_'));
@@ -519,8 +523,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
     setWoResult(null);
     try {
       // ── 1단계: 오프라인 매장 재고 조회 ──
-      const { data: wh } = await supabaseAdmin.from('warehouse').select('id').eq('name', '오프라인샵').single();
-      const whId = wh?.id;
+      const whId = await getWarehouseId('오프라인샵');
       const invMap: Record<string, number> = {};
       if (whId) {
         let offset = 0;
@@ -825,12 +828,12 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       }
 
       // 3. 플레이위즈 재고 조회
-      const { data: pwWh } = await supabaseAdmin.from('warehouse').select('id').eq('name', '플레이위즈').single();
+      const pwWhId = await getWarehouseId('플레이위즈');
       const pwInvMap: Record<string, number> = {};
-      if (pwWh) {
+      if (pwWhId) {
         let offset = 0;
         while (true) {
-          const { data: inv } = await supabaseAdmin.from('inventory').select('sku_id, quantity').eq('warehouse_id', pwWh.id).range(offset, offset + 999);
+          const { data: inv } = await supabaseAdmin.from('inventory').select('sku_id, quantity').eq('warehouse_id', pwWhId).range(offset, offset + 999);
           if (!inv || inv.length === 0) break;
           for (const r of inv) pwInvMap[r.sku_id] = (pwInvMap[r.sku_id] || 0) + r.quantity;
           if (inv.length < 1000) break;

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../../lib/supabase';
+import { getWarehouseId } from '../../lib/warehouseStore';
 import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
@@ -70,20 +71,15 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
     setError(null);
     setEditingSkuId(null);
     try {
-      const { data: wh, error: whErr } = await supabase
-        .from('warehouse')
-        .select('id')
-        .eq('name', currentTab.warehouseName)
-        .single();
-      if (whErr) throw whErr;
-      if (!wh) throw new Error(`${currentTab.warehouseName} 창고를 찾을 수 없습니다.`);
+      const whId = await getWarehouseId(currentTab.warehouseName);
+      if (!whId) throw new Error(`${currentTab.warehouseName} 창고를 찾을 수 없습니다.`);
       if (isStale()) return;
-      setWarehouseId(wh.id);
+      setWarehouseId(whId);
 
       const { data, error: invErr } = await supabase
         .from('inventory')
         .select('sku_id, needs_marking, quantity, sku(sku_name, barcode)')
-        .eq('warehouse_id', wh.id)
+        .eq('warehouse_id', whId)
         .gt('quantity', 0)
         .order('sku_id');
       if (invErr) throw invErr;
