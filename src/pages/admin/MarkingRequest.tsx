@@ -4,6 +4,7 @@ import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import type { AppUser } from '../../types';
 import { AlertTriangle, CheckCircle, FileUp, Search, ClipboardList, Clock, Trash2 } from 'lucide-react';
+import { useReadOnly } from '../../contexts/ReadOnlyContext';
 
 interface RequestItem {
   finishedSkuId: string;
@@ -24,6 +25,7 @@ interface MarkingRequestRow {
 }
 
 export default function MarkingRequest({ currentUser }: { currentUser: AppUser }) {
+  const readOnly = useReadOnly();
   const [items, setItems] = useState<RequestItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -215,11 +217,11 @@ export default function MarkingRequest({ currentUser }: { currentUser: AppUser }
         </div>
 
         <div className="flex gap-2">
-          <button onClick={() => fileInputRef.current?.click()} disabled={loading}
+          <button onClick={() => fileInputRef.current?.click()} disabled={readOnly || loading}
             className="flex items-center gap-1.5 px-3 py-2 text-sm border border-indigo-300 rounded-lg text-indigo-600 hover:bg-indigo-50 disabled:opacity-50">
             <FileUp size={15} />{loading ? '분석 중...' : '엑셀 업로드'}
           </button>
-          <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={handleExcelUpload} />
+          <input ref={fileInputRef} type="file" accept=".xlsx,.xls,.csv" disabled={readOnly} className="hidden" onChange={handleExcelUpload} />
         </div>
 
         {error && (
@@ -286,7 +288,7 @@ export default function MarkingRequest({ currentUser }: { currentUser: AppUser }
             <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="메모 (선택)"
               className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm resize-none" rows={2} />
 
-            <button onClick={handleSubmitRequest} disabled={saving || totalQty === 0}
+            <button onClick={handleSubmitRequest} disabled={readOnly || saving || totalQty === 0}
               className="w-full bg-indigo-600 text-white py-3.5 rounded-xl font-semibold hover:bg-indigo-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 text-base">
               <ClipboardList size={20} />
               {saving ? '등록 중...' : `마킹 요청 등록 (${items.filter((i) => i.qty > 0).length}종 ${totalQty}개)`}
@@ -318,7 +320,7 @@ export default function MarkingRequest({ currentUser }: { currentUser: AppUser }
                     {req.notes && <p className="text-xs text-gray-400 truncate">{req.notes}</p>}
                   </div>
                   {req.status === 'pending' && (
-                    <button onClick={() => handleCancel(req.id)} className="text-red-400 hover:text-red-600" title="취소">
+                    <button onClick={() => handleCancel(req.id)} disabled={readOnly} className="text-red-400 hover:text-red-600 disabled:opacity-50" title="취소">
                       <Trash2 size={16} />
                     </button>
                   )}

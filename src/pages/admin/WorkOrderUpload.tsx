@@ -4,6 +4,7 @@ import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { parseWorkOrderExcel, type RawOrderLine } from '../../lib/excelParser';
 import { Upload, CheckCircle, AlertTriangle, FileSpreadsheet } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { useReadOnly } from '../../contexts/ReadOnlyContext';
 
 interface ParseResult {
   lines: RawOrderLine[];
@@ -14,6 +15,7 @@ interface ParseResult {
 }
 
 export default function WorkOrderUpload() {
+  const readOnly = useReadOnly();
   const [parsing, setParsing] = useState(false);
   const [parseProgress, setParseProgress] = useState<{ current: number; total: number; step: string } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -197,12 +199,13 @@ export default function WorkOrderUpload() {
 
       {/* 파일 업로드 영역 (클릭 + 드래그앤드롭) */}
       <div
-        className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors ${
+        className={`border-2 border-dashed rounded-xl p-10 text-center transition-colors ${
+          readOnly ? 'opacity-50 cursor-not-allowed' :
           isDragging
-            ? 'border-blue-500 bg-blue-100'
-            : 'border-gray-300 hover:border-blue-400 hover:bg-blue-50'
+            ? 'border-blue-500 bg-blue-100 cursor-pointer'
+            : 'border-gray-300 hover:border-blue-400 hover:bg-blue-50 cursor-pointer'
         }`}
-        onClick={() => fileInputRef.current?.click()}
+        onClick={() => !readOnly && fileInputRef.current?.click()}
         onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
@@ -219,6 +222,7 @@ export default function WorkOrderUpload() {
           type="file"
           accept=".xlsx,.xls"
           onChange={handleFile}
+          disabled={readOnly}
           className="hidden"
         />
       </div>
@@ -339,7 +343,7 @@ export default function WorkOrderUpload() {
           )}
           <button
             onClick={handleSave}
-            disabled={saving}
+            disabled={readOnly || saving}
             className="w-full bg-blue-600 text-white py-3 rounded-xl font-medium hover:bg-blue-700 disabled:opacity-60 transition-colors flex items-center justify-center gap-2"
           >
             <Upload size={18} />

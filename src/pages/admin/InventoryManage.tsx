@@ -4,6 +4,7 @@ import { getWarehouseId } from '../../lib/warehouseStore';
 import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
+import { useReadOnly } from '../../contexts/ReadOnlyContext';
 import { recordTransaction } from '../../lib/inventoryTransaction';
 import * as XLSX from 'xlsx';
 import {
@@ -37,6 +38,7 @@ type TabKey = (typeof TABS)[number]['key'];
 
 export default function InventoryManage({ currentUserId }: { currentUserId: string }) {
   const isStale = useStaleGuard();
+  const readOnly = useReadOnly();
   const [activeTab, setActiveTab] = useState<TabKey>('offline');
   const [warehouseId, setWarehouseId] = useState<string | null>(null);
   const [rows, setRows] = useState<InventoryRow[]>([]);
@@ -402,11 +404,12 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
 
         <button
           onClick={() => { setShowUpload(!showUpload); setParsedItems([]); }}
+          disabled={readOnly}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors ${
             showUpload
               ? 'bg-amber-600 text-white'
               : 'bg-white text-amber-600 border border-amber-200 hover:bg-amber-50'
-          }`}
+          } disabled:opacity-50 disabled:cursor-not-allowed`}
         >
           <Upload size={16} />
           기초재고 업로드
@@ -444,7 +447,7 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
                 type="file"
                 accept=".xls,.xlsx"
                 onChange={handleFileSelect}
-                disabled={parsing || !warehouseId}
+                disabled={readOnly || parsing || !warehouseId}
                 className="hidden"
               />
             </label>
@@ -534,7 +537,7 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
                 </button>
                 <button
                   onClick={handleApplyStock}
-                  disabled={uploading || changedItems.length === 0}
+                  disabled={readOnly || uploading || changedItems.length === 0}
                   className="bg-amber-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-amber-700 disabled:opacity-50"
                 >
                   {uploading
@@ -645,7 +648,7 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
                         <div className="flex items-center justify-end gap-1">
                           <button
                             onClick={() => saveEdit(row)}
-                            disabled={saving}
+                            disabled={readOnly || saving}
                             className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg disabled:opacity-50"
                             title="저장"
                           >
@@ -663,7 +666,8 @@ export default function InventoryManage({ currentUserId }: { currentUserId: stri
                       ) : (
                         <button
                           onClick={() => startEdit(row)}
-                          className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                          disabled={readOnly}
+                          className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
                           title="수정"
                         >
                           <Pencil size={14} />

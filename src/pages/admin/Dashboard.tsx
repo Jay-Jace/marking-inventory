@@ -4,6 +4,7 @@ import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { supabase } from '../../lib/supabase';
 import { getWarehouseId } from '../../lib/warehouseStore';
 import { Trash2, AlertTriangle, CheckCircle, XCircle, Eye, RotateCcw, Settings } from 'lucide-react';
+import { useReadOnly } from '../../contexts/ReadOnlyContext';
 import { CardSkeleton } from '../../components/LoadingSkeleton';
 import {
   getSteps,
@@ -57,6 +58,7 @@ interface RequestDetail {
 
 export default function Dashboard({ currentUser }: DashboardProps) {
   const isStale = useStaleGuard();
+  const readOnly = useReadOnly();
   const [activeOrders, setActiveOrders] = useState<ActiveOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -638,7 +640,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                             </button>
                             <button
                               onClick={() => handleDelete(wo)}
-                              disabled={deleting}
+                              disabled={readOnly || deleting}
                               className="px-3 py-1 text-xs text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 flex items-center gap-1"
                             >
                               <Trash2 size={12} />
@@ -665,7 +667,8 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                         {(wo.status === '취소요청' || wo.status === '수정요청') && (
                           <button
                             onClick={() => loadRequestDetail(wo.id, wo.downloadDate, wo.status === '취소요청' ? 'cancel' : 'modify')}
-                            className="px-2.5 py-1 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 flex items-center gap-1"
+                            disabled={readOnly}
+                            className="px-2.5 py-1 text-xs font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-1"
                             title="상세 보기"
                           >
                             <Eye size={12} />
@@ -675,7 +678,8 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                         {['이관중', '입고확인완료', '마킹중', '마킹완료'].includes(wo.status) && (
                           <button
                             onClick={() => openRemainingModal(wo)}
-                            className="px-2.5 py-1 text-xs font-medium text-amber-600 bg-amber-50 rounded-lg hover:bg-amber-100 flex items-center gap-1"
+                            disabled={readOnly}
+                            className="px-2.5 py-1 text-xs font-medium text-amber-600 bg-amber-50 rounded-lg hover:bg-amber-100 flex items-center gap-1 disabled:opacity-50"
                             title="잔량 수정"
                           >
                             잔량 수정
@@ -688,7 +692,8 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                             const steps = await getRollbackableSteps(wo.id, wo.status as WorkOrderStatus);
                             setRollbackableSteps(steps);
                           }}
-                          className="px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 flex items-center gap-1"
+                          disabled={readOnly}
+                          className="px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 flex items-center gap-1 disabled:opacity-50"
                           title="관리"
                         >
                           <Settings size={12} />
@@ -696,7 +701,8 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                         </button>
                         <button
                           onClick={() => setConfirmId(wo.id)}
-                          className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                          disabled={readOnly}
+                          className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
                           title="삭제"
                         >
                           <Trash2 size={14} />
@@ -796,7 +802,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
               </button>
               <button
                 onClick={() => handleRejectRequest(requestDetail.workOrderId)}
-                disabled={approving}
+                disabled={readOnly || approving}
                 className="flex-1 py-2.5 bg-gray-600 text-white rounded-xl text-sm font-semibold hover:bg-gray-700 disabled:opacity-50 flex items-center justify-center gap-1"
               >
                 <XCircle size={14} />
@@ -808,7 +814,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                     ? handleApproveCancel(requestDetail.workOrderId)
                     : handleApproveModify(requestDetail.workOrderId)
                 }
-                disabled={approving}
+                disabled={readOnly || approving}
                 className={`flex-1 py-2.5 text-white rounded-xl text-sm font-semibold disabled:opacity-50 flex items-center justify-center gap-1 ${
                   requestDetail.type === 'cancel'
                     ? 'bg-red-600 hover:bg-red-700'
@@ -897,7 +903,8 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                             await loadSessions(manageOrder.id, step as any);
                             setRollbackConfirm(true);
                           }}
-                          className="px-3 py-1 bg-orange-500 text-white rounded-lg text-xs font-semibold hover:bg-orange-600 flex items-center gap-1"
+                          disabled={readOnly}
+                          className="px-3 py-1 bg-orange-500 text-white rounded-lg text-xs font-semibold hover:bg-orange-600 flex items-center gap-1 disabled:opacity-50"
                         >
                           <RotateCcw size={12} />
                           선택
@@ -1056,7 +1063,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
               </button>
               <button
                 onClick={handleRollback}
-                disabled={rolling || (rollbackMode === 'select' && selectedSessions.size === 0)}
+                disabled={readOnly || rolling || (rollbackMode === 'select' && selectedSessions.size === 0)}
                 className="flex-1 py-2.5 bg-red-500 text-white rounded-lg text-sm font-semibold hover:bg-red-600 disabled:opacity-50 flex items-center justify-center gap-1.5"
               >
                 <Trash2 size={14} />
@@ -1079,7 +1086,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
 
             <div className="px-5 py-4 space-y-3 max-h-[50vh] overflow-y-auto">
               {/* 전체 취소 버튼 */}
-              <button onClick={() => cancelAllRemaining()} className="text-xs text-red-600 underline">
+              <button onClick={() => cancelAllRemaining()} disabled={readOnly} className="text-xs text-red-600 underline disabled:opacity-50">
                 잔량 전체 취소 (발송 불필요 처리)
               </button>
 
@@ -1125,7 +1132,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
               </button>
               <button
                 onClick={saveRemaining}
-                disabled={savingRemaining || remainingModal.lines.every(l => l.newOrdered === l.orderedQty)}
+                disabled={readOnly || savingRemaining || remainingModal.lines.every(l => l.newOrdered === l.orderedQty)}
                 className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
               >
                 {savingRemaining ? '저장 중...' : '저장'}

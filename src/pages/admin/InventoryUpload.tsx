@@ -2,6 +2,7 @@ import { useState, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
 import { parseStockExcel, type StockRow } from '../../lib/excelParser';
 import { Upload, CheckCircle, AlertTriangle, FileSpreadsheet, RotateCcw } from 'lucide-react';
+import { useReadOnly } from '../../contexts/ReadOnlyContext';
 
 interface ParseResult {
   rows: StockRow[];
@@ -15,6 +16,7 @@ const WAREHOUSE_ICONS: Record<string, string> = {
 };
 
 export default function InventoryUpload() {
+  const readOnly = useReadOnly();
   const [parsing, setParsing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveProgress, setSaveProgress] = useState<{ current: number; total: number; step: string } | null>(null);
@@ -173,12 +175,13 @@ export default function InventoryUpload() {
 
       {/* 파일 업로드 영역 */}
       <div
-        className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors ${
+        className={`border-2 border-dashed rounded-xl p-10 text-center transition-colors ${
+          readOnly ? 'opacity-50 cursor-not-allowed' :
           isDragging
-            ? 'border-blue-500 bg-blue-100'
-            : 'border-gray-300 hover:border-blue-400 hover:bg-blue-50'
+            ? 'border-blue-500 bg-blue-100 cursor-pointer'
+            : 'border-gray-300 hover:border-blue-400 hover:bg-blue-50 cursor-pointer'
         }`}
-        onClick={() => fileInputRef.current?.click()}
+        onClick={() => !readOnly && fileInputRef.current?.click()}
         onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
@@ -193,6 +196,7 @@ export default function InventoryUpload() {
           type="file"
           accept=".xlsx,.xls"
           onChange={handleFile}
+          disabled={readOnly}
           className="hidden"
         />
       </div>
@@ -281,7 +285,7 @@ export default function InventoryUpload() {
 
           <button
             onClick={handleSave}
-            disabled={saving}
+            disabled={readOnly || saving}
             className="w-full bg-blue-600 text-white py-3 rounded-xl font-medium hover:bg-blue-700 disabled:opacity-60 transition-colors flex items-center justify-center gap-2"
           >
             <Upload size={18} />

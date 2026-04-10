@@ -31,6 +31,7 @@ import SKUMaster from './pages/admin/SKUMaster';
 import OrderUpload from './pages/admin/OrderUpload';
 import Progress from './pages/admin/Progress';
 import MarkingRequest from './pages/admin/MarkingRequest';
+import { ReadOnlyProvider } from './contexts/ReadOnlyContext';
 import type { UserRole, AppUser } from './types';
 
 function AppContent() {
@@ -42,6 +43,7 @@ function AppContent() {
 
   const defaultPaths: Record<UserRole, string> = {
     admin: '/admin/dashboard',
+    viewer: '/admin/dashboard',
     offline: '/offline/shipment',
     playwith: '/playwith/receipt',
   };
@@ -196,9 +198,11 @@ function AppContent() {
   }
 
   return (
+    <ReadOnlyProvider value={user.role === 'viewer'}>
     <Layout
       role={user.role}
       userName={user.name}
+      email={user.email}
       viewAs={viewAs}
       onViewAsChange={handleViewAsChange}
     >
@@ -210,8 +214,7 @@ function AppContent() {
         <Route path="/admin/bom" element={<BOMManage />} />
         <Route path="/admin/inventory" element={<InventoryUpload />} />
         <Route path="/admin/stock" element={<InventoryManage currentUserId={user.id} />} />
-        {/* currentUserId를 prop으로 전달 → UserManage 내 getSession() 중복 제거 */}
-        <Route path="/admin/users" element={<UserManage currentUserId={user.id} />} />
+        <Route path="/admin/users" element={<UserManage currentUser={user} />} />
         <Route path="/admin/history" element={<ActivityHistory />} />
         <Route path="/admin/sales" element={<SalesUpload />} />
         <Route path="/admin/tx-history" element={<TxHistory />} />
@@ -237,7 +240,7 @@ function AppContent() {
           element={
             <Navigate
               to={
-                user.role === 'admin'
+                user.role === 'admin' || user.role === 'viewer'
                   ? '/admin/dashboard'
                   : user.role === 'offline'
                   ? '/offline/shipment'
@@ -249,6 +252,7 @@ function AppContent() {
         />
       </Routes>
     </Layout>
+    </ReadOnlyProvider>
   );
 }
 

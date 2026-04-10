@@ -45,45 +45,45 @@ const navGroups: NavGroup[] = [
   {
     label: '현황',
     icon: <BarChart3 size={16} />,
-    roles: ['admin'],
+    roles: ['admin', 'viewer'],
     items: [
-      { label: '대시보드', path: '/admin/dashboard', icon: <LayoutDashboard size={18} />, roles: ['admin'] },
-      { label: '진행 현황', path: '/admin/progress', icon: <ClipboardList size={18} />, roles: ['admin'] },
-      { label: '활동 이력', path: '/admin/history', icon: <Clock size={18} />, roles: ['admin'] },
+      { label: '대시보드', path: '/admin/dashboard', icon: <LayoutDashboard size={18} />, roles: ['admin', 'viewer'] },
+      { label: '진행 현황', path: '/admin/progress', icon: <ClipboardList size={18} />, roles: ['admin', 'viewer'] },
+      { label: '활동 이력', path: '/admin/history', icon: <Clock size={18} />, roles: ['admin', 'viewer'] },
     ],
   },
   {
     label: '주문·작업',
     icon: <FileText size={16} />,
-    roles: ['admin'],
+    roles: ['admin', 'viewer'],
     items: [
-      { label: '주문 관리', path: '/admin/orders', icon: <ShoppingCart size={18} />, roles: ['admin'] },
-      { label: '작업지시서 업로드', path: '/admin/workorder', icon: <Upload size={18} />, roles: ['admin'] },
-      { label: '양식 다운로드', path: '/admin/downloads', icon: <Download size={18} />, roles: ['admin'] },
-      { label: '수기 마킹 요청', path: '/admin/marking-request', icon: <ClipboardList size={18} />, roles: ['admin'] },
+      { label: '주문 관리', path: '/admin/orders', icon: <ShoppingCart size={18} />, roles: ['admin', 'viewer'] },
+      { label: '작업지시서 업로드', path: '/admin/workorder', icon: <Upload size={18} />, roles: ['admin', 'viewer'] },
+      { label: '양식 다운로드', path: '/admin/downloads', icon: <Download size={18} />, roles: ['admin', 'viewer'] },
+      { label: '수기 마킹 요청', path: '/admin/marking-request', icon: <ClipboardList size={18} />, roles: ['admin', 'viewer'] },
     ],
   },
   {
     label: '재고',
     icon: <Package size={16} />,
-    roles: ['admin'],
+    roles: ['admin', 'viewer'],
     items: [
-      { label: '재고 관리', path: '/admin/stock', icon: <Package size={18} />, roles: ['admin'] },
-      { label: '재고 수불부', path: '/admin/stock-ledger', icon: <BookOpen size={18} />, roles: ['admin'] },
-      { label: 'CJ 입출고 관리', path: '/admin/cj-manage', icon: <Truck size={18} />, roles: ['admin'] },
-      { label: '입/출고 현황', path: '/admin/tx-history', icon: <BarChart3 size={18} />, roles: ['admin'] },
-      { label: '매장 입/출고 등록', path: '/admin/sales', icon: <ShoppingCart size={18} />, roles: ['admin'] },
+      { label: '재고 관리', path: '/admin/stock', icon: <Package size={18} />, roles: ['admin', 'viewer'] },
+      { label: '재고 수불부', path: '/admin/stock-ledger', icon: <BookOpen size={18} />, roles: ['admin', 'viewer'] },
+      { label: 'CJ 입출고 관리', path: '/admin/cj-manage', icon: <Truck size={18} />, roles: ['admin', 'viewer'] },
+      { label: '입/출고 현황', path: '/admin/tx-history', icon: <BarChart3 size={18} />, roles: ['admin', 'viewer'] },
+      { label: '매장 입/출고 등록', path: '/admin/sales', icon: <ShoppingCart size={18} />, roles: ['admin', 'viewer'] },
     ],
   },
   {
     label: '마스터',
     icon: <Settings size={16} />,
-    roles: ['admin'],
+    roles: ['admin', 'viewer'],
     items: [
-      { label: '품목 마스터', path: '/admin/sku-master', icon: <List size={18} />, roles: ['admin'] },
-      { label: 'BOM 관리', path: '/admin/bom', icon: <Database size={18} />, roles: ['admin'] },
-      { label: '재고 업로드', path: '/admin/inventory', icon: <Warehouse size={18} />, roles: ['admin'] },
-      { label: '계정 관리', path: '/admin/users', icon: <Users size={18} />, roles: ['admin'] },
+      { label: '품목 마스터', path: '/admin/sku-master', icon: <List size={18} />, roles: ['admin', 'viewer'] },
+      { label: 'BOM 관리', path: '/admin/bom', icon: <Database size={18} />, roles: ['admin', 'viewer'] },
+      { label: '재고 업로드', path: '/admin/inventory', icon: <Warehouse size={18} />, roles: ['admin', 'viewer'] },
+      { label: '계정 관리', path: '/admin/users', icon: <Users size={18} />, roles: ['admin', 'viewer'] },
     ],
   },
   {
@@ -111,11 +111,14 @@ interface LayoutProps {
   children: React.ReactNode;
   role: UserRole;
   userName: string;
+  email: string;
   viewAs?: UserRole | null;
   onViewAsChange?: (role: UserRole | null) => void;
 }
 
-export default function Layout({ children, role, userName, viewAs, onViewAsChange }: LayoutProps) {
+const SUPER_ADMIN_EMAIL = 'jace.nice@kakaoent.com';
+
+export default function Layout({ children, role, userName, email, viewAs, onViewAsChange }: LayoutProps) {
   const location = useLocation();
   const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -141,11 +144,20 @@ export default function Layout({ children, role, userName, viewAs, onViewAsChang
 
   const roleLabel = {
     admin: '관리자',
+    viewer: '조회자',
     offline: '오프라인 매장',
     playwith: '플레이위즈',
   }[effectiveRole];
 
-  const filteredGroups = navGroups.filter((g) => g.roles.includes(effectiveRole));
+  const filteredGroups = navGroups
+    .filter((g) => g.roles.includes(effectiveRole))
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((item) =>
+        item.path === '/admin/users' ? email === SUPER_ADMIN_EMAIL : true
+      ),
+    }))
+    .filter((g) => g.items.length > 0);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();

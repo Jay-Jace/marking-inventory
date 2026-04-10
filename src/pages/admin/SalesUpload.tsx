@@ -5,6 +5,7 @@ import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { recordTransactionBatch } from '../../lib/inventoryTransaction';
 import type { TxType } from '../../types';
 import * as XLSX from 'xlsx';
+import { useReadOnly } from '../../contexts/ReadOnlyContext';
 import {
   ArrowDownCircle,
   ShoppingCart,
@@ -73,6 +74,7 @@ function parseDateValue(val: unknown): string {
 
 export default function SalesUpload() {
   const isStale = useStaleGuard();
+  const readOnly = useReadOnly();
 
   // 탭 상태
   const [activeTab, setActiveTab] = useState<TxType>('입고');
@@ -542,7 +544,7 @@ export default function SalesUpload() {
             type="file"
             accept=".xls,.xlsx"
             onChange={handleFileSelect}
-            disabled={parsing || !offlineWarehouse}
+            disabled={readOnly || parsing || !offlineWarehouse}
             className="hidden"
           />
         </label>
@@ -664,7 +666,7 @@ export default function SalesUpload() {
             </button>
             <button
               onClick={() => setSaveConfirmOpen(true)}
-              disabled={uploading || matchedRows.length === 0}
+              disabled={readOnly || uploading || matchedRows.length === 0}
               className={`bg-${tabColor}-600 text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-${tabColor}-700 disabled:opacity-50`}
             >
               {uploading ? '저장 중...' : isPosDaily
@@ -715,7 +717,8 @@ export default function SalesUpload() {
                   </div>
                   <button
                     onClick={() => openDeleteModal(d.date, d.txType)}
-                    className="p-1.5 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50"
+                    disabled={readOnly}
+                    className="p-1.5 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-50"
                     title="삭제"
                   >
                     <Trash2 className="w-4 h-4" />
@@ -762,7 +765,8 @@ export default function SalesUpload() {
               <button onClick={() => setSaveConfirmOpen(false)} className="px-4 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50">취소</button>
               <button
                 onClick={() => { setSaveConfirmOpen(false); handleSave(); }}
-                className={`bg-${tabColor}-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-${tabColor}-700`}
+                disabled={readOnly}
+                className={`bg-${tabColor}-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-${tabColor}-700 disabled:opacity-50`}
               >
                 저장
               </button>
@@ -794,7 +798,7 @@ export default function SalesUpload() {
               <button onClick={() => setDeleteModal(null)} className="px-4 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50">취소</button>
               <button
                 onClick={handleDelete}
-                disabled={!deleteConfirm || deleting}
+                disabled={readOnly || !deleteConfirm || deleting}
                 className="bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50"
               >
                 {deleting ? '삭제 중...' : '삭제'}

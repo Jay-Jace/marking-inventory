@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
+import { useReadOnly } from '../../contexts/ReadOnlyContext';
 import { parseBomExcel, parseBerrizBomExcel, type RawBomRow } from '../../lib/excelParser';
 import { Upload, Database, Trash2, AlertTriangle, CheckCircle, FileSpreadsheet, Search } from 'lucide-react';
 
@@ -18,6 +19,7 @@ type UploadMode = 'berriz' | 'manual';
 
 export default function BOMManage() {
   const isStale = useStaleGuard();
+  const readOnly = useReadOnly();
   const [boms, setBoms] = useState<BomEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
@@ -192,7 +194,7 @@ export default function BOMManage() {
         </div>
         <button
           onClick={() => fileInputRef.current?.click()}
-          disabled={uploading}
+          disabled={readOnly || uploading}
           className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-60 transition-colors shrink-0"
         >
           <Upload size={16} />
@@ -203,6 +205,7 @@ export default function BOMManage() {
           type="file"
           accept=".xlsx,.xls"
           onChange={handleFileUpload}
+          disabled={readOnly}
           className="hidden"
         />
       </div>
@@ -255,12 +258,13 @@ export default function BOMManage() {
 
       {/* 드래그앤드롭 업로드 영역 */}
       <div
-        className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors ${
+        className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors ${
+          readOnly ? 'opacity-50 cursor-not-allowed' :
           isDragging
-            ? 'border-blue-500 bg-blue-100'
-            : 'border-gray-300 hover:border-blue-400 hover:bg-blue-50'
+            ? 'border-blue-500 bg-blue-100 cursor-pointer'
+            : 'border-gray-300 hover:border-blue-400 hover:bg-blue-50 cursor-pointer'
         }`}
-        onClick={() => fileInputRef.current?.click()}
+        onClick={() => !readOnly && fileInputRef.current?.click()}
         onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
@@ -361,7 +365,8 @@ export default function BOMManage() {
                         <td className="px-4 py-2.5 text-right">
                           <button
                             onClick={() => handleDelete(bom.id)}
-                            className="text-gray-400 hover:text-red-500 transition-colors"
+                            disabled={readOnly}
+                            className="text-gray-400 hover:text-red-500 transition-colors disabled:opacity-50"
                           >
                             <Trash2 size={14} />
                           </button>

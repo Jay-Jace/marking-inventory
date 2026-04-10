@@ -4,6 +4,7 @@ import { supabase } from '../../lib/supabase';
 import { getWarehouseId } from '../../lib/warehouseStore';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
+import { useReadOnly } from '../../contexts/ReadOnlyContext';
 import { parseOrderExcel } from '../../lib/orderParser';
 import type { ParsedOrder } from '../../lib/orderParser';
 import type { OnlineOrder } from '../../types';
@@ -27,6 +28,7 @@ interface MarkingAnalysisResult {
 
 export default function OrderUpload({ currentUserId }: { currentUserId: string }) {
   const isStale = useStaleGuard();
+  const readOnly = useReadOnly();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // 업로드
@@ -969,11 +971,12 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         <p className="text-sm text-gray-500 mb-3">FulfillmentShipping 엑셀을 업로드하면 배송상태별 자동 분류됩니다. (배송대기→신규등록, 배송준비중/중/완료→자동출고완료, 진행중→스킵)</p>
         <button
           onClick={() => fileInputRef.current?.click()}
-          className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm hover:bg-indigo-700 flex items-center gap-2"
+          disabled={readOnly}
+          className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm hover:bg-indigo-700 flex items-center gap-2 disabled:opacity-50"
         >
           <Upload size={14} /> 엑셀 파일 선택
         </button>
-        <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFileSelect} className="hidden" />
+        <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleFileSelect} disabled={readOnly} className="hidden" />
       </div>
 
       {/* ── 파싱 미리보기 ── */}
@@ -1088,7 +1091,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           <div className="flex gap-2">
             <button
               onClick={handleSave}
-              disabled={saving || (newOrders.length === 0 && autoCompleteOrders.length === 0)}
+              disabled={readOnly || saving || (newOrders.length === 0 && autoCompleteOrders.length === 0)}
               className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:bg-gray-300"
             >
               {saving ? '저장 중...' : (() => {
@@ -1119,7 +1122,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           <div className="flex items-center gap-2">
             <button
               onClick={analyzeMarkingPossible}
-              disabled={markingAnalysis.loading}
+              disabled={readOnly || markingAnalysis.loading}
               className="px-4 py-1.5 bg-purple-600 text-white rounded-lg text-xs font-semibold hover:bg-purple-700 disabled:bg-gray-300 flex items-center gap-1"
             >
               <BarChart3 size={13} />
@@ -1127,7 +1130,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             </button>
             <button
               onClick={handleCreateWorkOrder}
-              disabled={creatingWo || orders.filter(o => (o.status === '신규' || o.status === '재고부족') && !o.work_order_id).length === 0}
+              disabled={readOnly || creatingWo || orders.filter(o => (o.status === '신규' || o.status === '재고부족') && !o.work_order_id).length === 0}
               className="px-4 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-semibold hover:bg-indigo-700 disabled:bg-gray-300"
             >
               {creatingWo ? '생성 중...' : `작업지시서 생성 (${orders.filter(o => (o.status === '신규' || o.status === '재고부족') && !o.work_order_id).length}건)`}
@@ -1140,7 +1143,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             />
             <button
               onClick={handleDeleteByDate}
-              disabled={!deleteDate}
+              disabled={readOnly || !deleteDate}
               className="px-3 py-1.5 bg-red-50 text-red-600 border border-red-200 rounded-lg text-xs hover:bg-red-100 disabled:opacity-40"
             >
               등록일 삭제
@@ -1163,7 +1166,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
               {deletePreview.date} 등록분 <strong>{deletePreview.count}건</strong> 삭제하시겠습니까?
             </span>
             <div className="flex gap-2">
-              <button onClick={confirmDeleteByDate} disabled={deleting || deletePreview.count === 0}
+              <button onClick={confirmDeleteByDate} disabled={readOnly || deleting || deletePreview.count === 0}
                 className="px-3 py-1.5 bg-red-600 text-white rounded-lg text-xs hover:bg-red-700 disabled:bg-gray-300">
                 {deleting ? '삭제 중...' : '삭제 확인'}
               </button>
@@ -1388,7 +1391,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             <div className="flex gap-2">
               <button
                 onClick={handleCancel}
-                disabled={cancelling}
+                disabled={readOnly || cancelling}
                 className="flex-1 py-2.5 bg-red-600 text-white rounded-xl text-sm font-semibold hover:bg-red-700 disabled:bg-gray-300"
               >
                 {cancelling ? '처리 중...' : '이 라인 취소'}

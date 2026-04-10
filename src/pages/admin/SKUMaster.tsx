@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { supabaseAdmin } from '../../lib/supabaseAdmin';
 import { supabase } from '../../lib/supabase';
+import { useReadOnly } from '../../contexts/ReadOnlyContext';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import * as XLSX from 'xlsx';
@@ -21,6 +22,7 @@ const SKU_TYPES = ['완제품', '유니폼단품', '마킹단품'] as const;
 
 export default function SKUMaster({ currentUserId }: { currentUserId: string }) {
   const isStale = useStaleGuard();
+  const readOnly = useReadOnly();
   const [skus, setSkus] = useState<SKU[]>([]);
   const [loading, setLoading] = useState(true);
   useLoadingTimeout(loading, setLoading);
@@ -468,7 +470,8 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
         </button>
         <button
           onClick={() => setShowAddForm(!showAddForm)}
-          className={`flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-sm ${
+          disabled={readOnly}
+          className={`flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-sm disabled:opacity-50 ${
             showAddForm
               ? 'bg-gray-200 text-gray-700 hover:bg-gray-300'
               : 'bg-blue-600 text-white hover:bg-blue-700'
@@ -478,11 +481,12 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
         </button>
         <button
           onClick={() => fileInputRef.current?.click()}
-          className="flex items-center gap-1.5 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm hover:bg-indigo-700"
+          disabled={readOnly}
+          className="flex items-center gap-1.5 px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm hover:bg-indigo-700 disabled:opacity-50"
         >
           <Upload size={14} /> 엑셀 등록/수정
         </button>
-        <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleUpload} className="hidden" />
+        <input ref={fileInputRef} type="file" accept=".xlsx,.xls" onChange={handleUpload} disabled={readOnly} className="hidden" />
       </div>
 
       {/* 수기 등록 폼 */}
@@ -531,7 +535,7 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
           <div className="flex gap-2 mt-3">
             <button
               onClick={handleAddManual}
-              disabled={addSaving}
+              disabled={readOnly || addSaving}
               className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
             >
               {addSaving ? '등록 중...' : '등록'}
@@ -646,7 +650,7 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
           <div className="flex gap-2 mt-3">
             <button
               onClick={handleUploadSave}
-              disabled={uploading || (uploadPreview.newTotal === 0 && uploadPreview.updateTotal === 0)}
+              disabled={readOnly || uploading || (uploadPreview.newTotal === 0 && uploadPreview.updateTotal === 0)}
               className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700 disabled:bg-gray-300"
             >
               {uploading
@@ -729,7 +733,7 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
                         </td>
                         <td className="px-3 py-2 text-center">
                           <div className="flex items-center justify-center gap-1">
-                            <button onClick={saveEdit} disabled={saving} className="p-1 text-green-600 hover:bg-green-50 rounded">
+                            <button onClick={saveEdit} disabled={readOnly || saving} className="p-1 text-green-600 hover:bg-green-50 rounded">
                               <Check size={16} />
                             </button>
                             <button onClick={cancelEdit} className="p-1 text-gray-400 hover:bg-gray-100 rounded">
@@ -752,10 +756,10 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
                         </td>
                         <td className="px-3 py-2 text-center">
                           <div className="flex items-center justify-center gap-1">
-                            <button onClick={() => startEdit(sku)} className="p-1 text-indigo-500 hover:bg-indigo-50 rounded">
+                            <button onClick={() => startEdit(sku)} disabled={readOnly} className="p-1 text-indigo-500 hover:bg-indigo-50 rounded disabled:opacity-50">
                               <Pencil size={14} />
                             </button>
-                            <button onClick={() => setDeleteTarget(sku)} className="p-1 text-red-400 hover:bg-red-50 rounded">
+                            <button onClick={() => setDeleteTarget(sku)} disabled={readOnly} className="p-1 text-red-400 hover:bg-red-50 rounded disabled:opacity-50">
                               <Trash2 size={14} />
                             </button>
                           </div>
@@ -790,7 +794,8 @@ export default function SKUMaster({ currentUserId }: { currentUserId: string }) 
             <div className="flex gap-2">
               <button
                 onClick={handleDelete}
-                className="flex-1 py-2.5 bg-red-600 text-white rounded-xl text-sm font-semibold hover:bg-red-700"
+                disabled={readOnly}
+                className="flex-1 py-2.5 bg-red-600 text-white rounded-xl text-sm font-semibold hover:bg-red-700 disabled:opacity-50"
               >
                 삭제
               </button>

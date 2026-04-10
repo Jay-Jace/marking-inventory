@@ -9,6 +9,7 @@ import type { OfflineStockParseResult } from '../../lib/offlineStockParser';
 import type { TxType } from '../../types';
 import * as XLSX from 'xlsx';
 import { Upload, Download, Search, AlertTriangle, Store } from 'lucide-react';
+import { useReadOnly } from '../../contexts/ReadOnlyContext';
 
 interface LedgerRow {
   warehouseName: string;
@@ -28,6 +29,7 @@ interface LedgerRow {
 }
 
 export default function StockLedger() {
+  const readOnly = useReadOnly();
   const isStale = useStaleGuard();
   const today = new Date().toISOString().slice(0, 10);
   const firstDay = today.slice(0, 8) + '01';
@@ -441,7 +443,7 @@ export default function StockLedger() {
           <label className="cursor-pointer bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-1.5 transition-colors">
             <Upload size={14} />
             엑셀 선택
-            <input type="file" accept=".xls,.xlsx" className="hidden" onChange={handleOfflineFileUpload} />
+            <input type="file" accept=".xls,.xlsx" className="hidden" onChange={handleOfflineFileUpload} disabled={readOnly} />
           </label>
         </div>
         <p className="text-xs text-gray-500 mb-3">
@@ -480,7 +482,7 @@ export default function StockLedger() {
 
             <button
               onClick={handleOfflineSave}
-              disabled={offlineUploading}
+              disabled={readOnly || offlineUploading}
               className="w-full py-2.5 rounded-lg text-white font-medium bg-green-600 hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors"
             >
               {offlineUploading ? '저장 중...' : `DB 저장 (${offlineMapped.length}건)`}

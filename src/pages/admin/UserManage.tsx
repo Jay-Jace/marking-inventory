@@ -3,7 +3,8 @@ import { supabase } from '../../lib/supabase';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { supabaseAdmin } from '../../lib/supabaseAdmin';
-import type { UserRole } from '../../types';
+import type { UserRole, AppUser } from '../../types';
+import { useReadOnly } from '../../contexts/ReadOnlyContext';
 import { Plus, Pencil, Trash2, Eye, EyeOff, X } from 'lucide-react';
 
 interface ManagedUser {
@@ -16,22 +17,29 @@ interface ManagedUser {
 
 const roleLabel: Record<UserRole, string> = {
   admin: '관리자',
+  viewer: '조회자',
   offline: '오프라인 매장',
   playwith: '플레이위즈',
 };
 
 const roleColor: Record<UserRole, string> = {
   admin: 'bg-red-100 text-red-700',
+  viewer: 'bg-green-100 text-green-700',
   offline: 'bg-blue-100 text-blue-700',
   playwith: 'bg-purple-100 text-purple-700',
 };
 
 interface Props {
-  currentUserId: string;
+  currentUser: AppUser;
 }
 
-export default function UserManage({ currentUserId }: Props) {
+const SUPER_ADMIN_EMAIL = 'jace.nice@kakaoent.com';
+
+export default function UserManage({ currentUser }: Props) {
   const isStale = useStaleGuard();
+  const readOnly = useReadOnly();
+  const currentUserId = currentUser.id;
+  const isSuperAdmin = currentUser.email === SUPER_ADMIN_EMAIL;
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [loading, setLoading] = useState(true);
   useLoadingTimeout(loading, setLoading);
@@ -285,7 +293,8 @@ export default function UserManage({ currentUserId }: Props) {
         <h2 className="text-xl font-bold text-gray-900">계정 관리</h2>
         <button
           onClick={openCreateModal}
-          className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+          disabled={readOnly || !isSuperAdmin}
+          className="flex items-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
         >
           <Plus size={16} />
           새 계정 추가
@@ -350,6 +359,7 @@ export default function UserManage({ currentUserId }: Props) {
               >
                 <option value="offline">오프라인 매장</option>
                 <option value="playwith">플레이위즈</option>
+                <option value="viewer">조회자</option>
                 <option value="admin">관리자</option>
               </select>
             </div>
@@ -378,7 +388,7 @@ export default function UserManage({ currentUserId }: Props) {
 
             <button
               onClick={editingUser ? handleUpdateUser : handleCreateUser}
-              disabled={saving}
+              disabled={readOnly || !isSuperAdmin || saving}
               className="w-full bg-blue-600 text-white py-2.5 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-60 transition-colors"
             >
               {saving ? '처리 중...' : editingUser ? '수정' : '생성'}
@@ -428,14 +438,16 @@ export default function UserManage({ currentUserId }: Props) {
                     {new Date(user.created_at).toLocaleDateString('ko-KR')}
                   </td>
                   <td className="px-4 py-3 text-right space-x-2">
-                    <button
-                      onClick={() => openEditModal(user)}
-                      className="text-gray-400 hover:text-blue-500 transition-colors"
-                      title="수정"
-                    >
-                      <Pencil size={14} />
-                    </button>
-                    {user.id !== currentUserId && (
+                    {isSuperAdmin && (
+                      <button
+                        onClick={() => openEditModal(user)}
+                        className="text-gray-400 hover:text-blue-500 transition-colors"
+                        title="수정"
+                      >
+                        <Pencil size={14} />
+                      </button>
+                    )}
+                    {isSuperAdmin && user.id !== currentUserId && (
                       <button
                         onClick={() => handleDeleteUser(user)}
                         className="text-gray-400 hover:text-red-500 transition-colors"

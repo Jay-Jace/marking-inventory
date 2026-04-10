@@ -9,8 +9,10 @@ import type { CjTransaction } from '../../lib/cjExcelParser';
 import type { TxType } from '../../types';
 import * as XLSX from 'xlsx';
 import { Upload, X, AlertTriangle, CheckCircle, SkipForward, FileUp, Trash2 } from 'lucide-react';
+import { useReadOnly } from '../../contexts/ReadOnlyContext';
 
 export default function CJManage() {
+  const readOnly = useReadOnly();
   // CJ 엑셀 업로드
   const [uploadType, setUploadType] = useState<TxType | null>(null);
   const [parsedItems, setParsedItems] = useState<CjTransaction[]>([]);
@@ -373,9 +375,9 @@ export default function CJManage() {
                     <div key={type} className="bg-gray-50 border border-gray-200 rounded-lg p-3 flex flex-col">
                       <div className="text-xs font-semibold text-gray-500 mb-2">{label}</div>
                       <div className="text-xs text-gray-400 mb-3">업로드 없음</div>
-                      <label className="mt-auto cursor-pointer bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-green-700 inline-flex items-center justify-center gap-1.5">
+                      <label className={`mt-auto bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-green-700 inline-flex items-center justify-center gap-1.5 ${readOnly ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
                         <Upload className="w-3.5 h-3.5" /> 엑셀 업로드
-                        <input type="file" accept=".xls,.xlsx" onChange={(e) => handleSingleUpload(e, type)} className="hidden" />
+                        <input type="file" accept=".xls,.xlsx" onChange={(e) => handleSingleUpload(e, type)} disabled={readOnly} className="hidden" />
                       </label>
                     </div>
                   );
@@ -394,13 +396,14 @@ export default function CJManage() {
                       <span className={`text-xs font-medium ${c.text}`}>{days === 0 ? '오늘' : `${days}일 전`}</span>
                     </div>
                     <div className="mt-auto flex items-center gap-2">
-                      <label className="flex-1 cursor-pointer bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-green-700 inline-flex items-center justify-center gap-1.5">
+                      <label className={`flex-1 bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-green-700 inline-flex items-center justify-center gap-1.5 ${readOnly ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
                         <Upload className="w-3.5 h-3.5" /> 엑셀 업로드
-                        <input type="file" accept=".xls,.xlsx" onChange={(e) => handleSingleUpload(e, type)} className="hidden" />
+                        <input type="file" accept=".xls,.xlsx" onChange={(e) => handleSingleUpload(e, type)} disabled={readOnly} className="hidden" />
                       </label>
                       <button
                         onClick={() => openDeleteModal(type, s.minDate, s.maxDate)}
-                        className="p-1.5 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                        disabled={readOnly}
+                        className="p-1.5 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
                         title="업로드 이력 삭제"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -412,9 +415,9 @@ export default function CJManage() {
             </div>
             {/* 일괄 업로드 */}
             <div className="border-t border-gray-100 pt-3">
-              <label className="cursor-pointer bg-gray-700 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-800 inline-flex items-center gap-2">
+              <label className={`bg-gray-700 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-800 inline-flex items-center gap-2 ${readOnly ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
                 <FileUp className="w-4 h-4" /> 일괄 업로드 (여러 파일)
-                <input type="file" accept=".xls,.xlsx" multiple onChange={handleBatchUpload} className="hidden" />
+                <input type="file" accept=".xls,.xlsx" multiple onChange={handleBatchUpload} disabled={readOnly} className="hidden" />
               </label>
               <span className="ml-3 text-xs text-gray-400">파일명으로 입고/출고/반품 자동 감지</span>
             </div>
@@ -550,7 +553,7 @@ export default function CJManage() {
             <div className="flex justify-end gap-2 mt-3">
               <button onClick={() => { setParsedItems([]); setUploadType(null); setSkippedCount(0); setOverlapWarning(null); setValidationErrors([]); }}
                 className="px-4 py-1.5 rounded-lg text-sm border border-gray-300 hover:bg-gray-50">취소</button>
-              <button onClick={handleSaveTx} disabled={uploading || parsedItems.length === 0}
+              <button onClick={handleSaveTx} disabled={readOnly || uploading || parsedItems.length === 0}
                 className="bg-green-600 text-white px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-green-700 disabled:opacity-50">
                 {uploading ? '검증 중...' : `${parsedItems.length}건 저장`}
               </button>
@@ -625,7 +628,7 @@ export default function CJManage() {
               </button>
               <button
                 onClick={handleDelete}
-                disabled={!deleteConfirm || deleting || !deletePreviewCount}
+                disabled={readOnly || !deleteConfirm || deleting || !deletePreviewCount}
                 className="bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {deleting ? '삭제 중...' : '삭제'}

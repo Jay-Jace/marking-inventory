@@ -71,7 +71,7 @@ export interface DailyMarking {
   line?: WorkOrderLine;
 }
 
-export type UserRole = 'admin' | 'offline' | 'playwith';
+export type UserRole = 'admin' | 'viewer' | 'offline' | 'playwith';
 
 export interface AppUser {
   id: string;
