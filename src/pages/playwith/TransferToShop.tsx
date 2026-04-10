@@ -42,6 +42,7 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
         .from('inventory')
         .select('sku_id, quantity, needs_marking, sku(sku_name, barcode)')
         .eq('warehouse_id', whId)
+        .eq('needs_marking', false)
         .gt('quantity', 0)
         .order('sku_id');
 
@@ -199,9 +200,8 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
     return i.skuId.toLowerCase().includes(q) || i.skuName.toLowerCase().includes(q) || (i.barcode || '').toLowerCase().includes(q);
   });
 
-  // 구분별 그룹
-  const markingItems = filtered.filter((i) => i.needsMarking);
-  const directItems = filtered.filter((i) => !i.needsMarking);
+  // needs_marking=false만 조회하므로 별도 그룹 분리 불필요
+  const directItems = filtered;
 
   return (
     <div className="space-y-5 max-w-3xl">
@@ -283,31 +283,6 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
                 </div>
               )}
 
-              {/* 마킹용 재고 */}
-              {markingItems.length > 0 && (
-                <div className="bg-white rounded-xl shadow-sm border border-purple-200 overflow-hidden">
-                  <div className="px-4 py-2.5 bg-purple-50 border-b border-purple-200">
-                    <p className="text-xs font-semibold text-purple-700">마킹용 재고 ({markingItems.length}종)</p>
-                  </div>
-                  <div className="divide-y divide-gray-50 max-h-64 overflow-y-auto">
-                    {markingItems.map((item) => (
-                      <div key={`${item.skuId}_${item.needsMarking}`} className="px-4 py-2.5 flex items-center justify-between">
-                        <div className="flex-1 min-w-0 mr-3">
-                          <p className="text-sm font-medium text-gray-800 truncate">{item.skuName}</p>
-                          <p className="text-xs text-gray-400 font-mono">{item.skuId}{item.barcode ? ` · ${item.barcode}` : ''}</p>
-                          <p className="text-xs text-purple-600">재고: {item.currentQty}</p>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <input type="number" min="0" max={item.currentQty} value={item.transferQty}
-                            onChange={(e) => handleQtyChange(item.skuId, item.needsMarking, Number(e.target.value))}
-                            className="w-20 border border-gray-300 rounded-lg px-2 py-1.5 text-sm text-right focus:outline-none focus:ring-2 focus:ring-teal-500" />
-                          <span className="text-xs text-gray-400">개</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
             </div>
           )}
 
