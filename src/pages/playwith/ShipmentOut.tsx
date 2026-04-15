@@ -1,7 +1,9 @@
 import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { getWarehouseId } from '../../lib/warehouseStore';
-import { recordTransaction } from '../../lib/inventoryTransaction';
+import { recordTransactionBatch, type RecordTxParams } from '../../lib/inventoryTransaction';
+import { checkNegativeStock, type StockDeduction } from '../../lib/negativeStockCheck';
+import NegativeStockWarningModal from '../../components/NegativeStockWarningModal';
 import { rollbackShipmentOut, type ProgressCallback } from '../../lib/workOrderRollback';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
@@ -10,7 +12,7 @@ import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import { TableSkeleton } from '../../components/LoadingSkeleton';
 import { notifySlack } from '../../lib/slackNotify';
-import type { AppUser } from '../../types';
+import type { AppUser, NegativeStockItem } from '../../types';
 
 interface ShipmentOutItem {
   finishedSkuId: string;
@@ -65,6 +67,11 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [rollbackProgress, setRollbackProgress] = useState<{ current: number; total: number; step: string } | null>(null);
+
+  // 음수 재고 경고
+  const [negativeItems, setNegativeItems] = useState<NegativeStockItem[]>([]);
+  const [showNegativeWarning, setShowNegativeWarning] = useState(false);
+  const confirmingRef = useRef(false);
 
   useEffect(() => {
     loadPendingOrders();
@@ -456,15 +463,54 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  // Step 1: 저장 버튼 → 음수 재고 사전 검사
   const handleConfirm = async () => {
-    if (!selectedWo || confirming) return;
+    if (!selectedWo || confirming || confirmingRef.current) return;
+    setError(null);
+
+    const activeItems = items.filter((i) => i.shipQty > 0);
+    if (activeItems.length === 0) return;
+
+    try {
+      const whId = await getWarehouseId('플레이위즈');
+      if (!whId) throw new Error('플레이위즈 창고를 찾을 수 없습니다.');
+
+      const deductions: StockDeduction[] = activeItems.map((i) => ({
+        warehouseId: whId,
+        warehouseName: '플레이위즈',
+        skuId: i.finishedSkuId,
+        skuName: i.skuName,
+        needsMarking: false,   // 출고 대상은 항상 완성품 (needs_marking=false 버킷)
+        deductQty: i.shipQty,
+      }));
+
+      const negatives = await checkNegativeStock(deductions);
+      if (isStale()) return;
+
+      if (negatives.length > 0) {
+        setNegativeItems(negatives);
+        setShowNegativeWarning(true);
+        return; // 모달 표시 후 대기
+      }
+
+      // 음수 없음 → 즉시 실행
+      await executeShipmentOut([]);
+    } catch (e: any) {
+      setError(`사전 검사 실패: ${e.message || '알 수 없는 오류'}`);
+    }
+  };
+
+  // Step 2: 실제 출고 처리 (경고 모달 "계속 진행" 또는 음수 없는 경우)
+  const executeShipmentOut = async (negatives: NegativeStockItem[]) => {
+    if (!selectedWo || confirmingRef.current) return;
+    confirmingRef.current = true;
     setConfirming(true);
     setConfirmProgress(null);
     setError(null);
+
     try {
-      const BATCH = 10;
       const activeItems = items.filter((i) => i.shipQty > 0);
-      const totalSteps = Math.ceil(activeItems.length / BATCH) + 3;
+      const totalSteps = 3;
       let step = 1;
 
       // 1. 상태 업데이트
@@ -512,45 +558,24 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
 
       // 2. 플레이위즈 창고 조회 (캐시)
       setConfirmProgress({ current: step, total: totalSteps, step: '창고 정보 조회 중...' });
-      const warehouse = { id: await getWarehouseId('플레이위즈') };
+      const whId = await getWarehouseId('플레이위즈');
+      if (!whId) throw new Error('플레이위즈 창고를 찾을 수 없습니다.');
       step++;
 
-      // 3. 플레이위즈 재고 차감 (배치 병렬)
-      if (warehouse) {
-        const whId = (warehouse as any).id;
-        for (let i = 0; i < activeItems.length; i += BATCH) {
-          const batch = activeItems.slice(i, i + BATCH);
-          setConfirmProgress({ current: step, total: totalSteps, step: `재고 차감 중... (${Math.min(i + BATCH, activeItems.length)} / ${activeItems.length})` });
-          await Promise.all(batch.map(async (item) => {
-            // needs_marking별로 재고 차감 (단품은 needs_marking=false에서, 마킹은 true/false 합산에서)
-            const nmFilter = item.needsMarking ? true : false;
-            const { data: inv } = await supabase
-              .from('inventory')
-              .select('quantity')
-              .eq('warehouse_id', whId)
-              .eq('sku_id', item.finishedSkuId)
-              .eq('needs_marking', nmFilter)
-              .maybeSingle();
-            if (inv) {
-              await supabase.from('inventory')
-                .update({ quantity: Math.max(0, (inv as any).quantity - item.shipQty) })
-                .eq('warehouse_id', whId)
-                .eq('sku_id', item.finishedSkuId)
-                .eq('needs_marking', nmFilter);
-            }
-            await recordTransaction({
-              warehouseId: whId,
-              skuId: item.finishedSkuId,
-              txType: '출고',
-              quantity: item.shipQty,
-              source: 'system',
-              needsMarking: item.needsMarking,
-              memo: `출고확인 (작업지시서 ${selectedWo.download_date})`,
-            });
-          }));
-          step++;
-        }
-      }
+      // 3. 플레이위즈 재고 차감 (batch + 음수 허용 여부 전달)
+      setConfirmProgress({ current: step, total: totalSteps, step: `재고 차감 중... (${activeItems.length}종)` });
+      const txRows: RecordTxParams[] = activeItems.map((item) => ({
+        warehouseId: whId,
+        skuId: item.finishedSkuId,
+        txType: '출고',
+        quantity: item.shipQty,
+        source: 'system',
+        needsMarking: false,   // 출고 대상은 항상 완성품 (needs_marking=false 버킷)
+        memo: `출고확인 (작업지시서 ${selectedWo.download_date})`,
+      }));
+      await recordTransactionBatch(txRows, undefined, undefined, {
+        allowNegative: negatives.length > 0,
+      });
 
       // Activity log (wave 번호 계산 포함)
       try {
@@ -567,17 +592,22 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
           action_date: new Date().toISOString().split('T')[0],
           summary: {
             wave: waveNum,
-            items: items.map((i) => ({ skuId: i.finishedSkuId, skuName: i.skuName, shipQty: i.shipQty, needsMarking: i.needsMarking })),
+            items: items.map((i) => ({ skuId: i.finishedSkuId, skuName: i.skuName, shipQty: i.shipQty, needsMarking: false })),
             totalQty: items.reduce((s, i) => s + i.shipQty, 0),
             workOrderDate: selectedWo.download_date,
+            hasNegativeStock: negatives.length > 0,
+            negativeStockItems: negatives.length > 0 ? negatives : undefined,
           },
         });
       } catch (logErr) { console.warn('Activity log failed:', logErr); }
 
       // 슬랙 알림용 데이터 (items 초기화 전에 캡처)
       const shippedItems = items.filter((i) => i.shipQty > 0);
+      const selectedWoSnapshot = selectedWo;
 
       setConfirmed(true);
+      setShowNegativeWarning(false);
+      setNegativeItems([]);
       setItems([]); // 중복 출고 방지: 아이템 목록 즉시 초기화
       setSelectedWo(null);
       // 출고 완료 후 WO 목록만 갱신 (selectOrder 호출 방지 → confirmed 리셋 방지)
@@ -592,9 +622,11 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
       notifySlack({
         action: '출고확인',
         user: currentUser.name || currentUser.email,
-        date: selectedWo.download_date,
+        date: selectedWoSnapshot.download_date,
         items: shippedItems.map((i) => ({ name: i.skuName, qty: i.shipQty })),
-        extra: !allMarkingDone ? '_출고 처리됨 (마킹 미완료 라인 있음)_' : undefined,
+        extra: negatives.length > 0
+          ? `_음수 재고 발생 (${negatives.length}종)_`
+          : (!allMarkingDone ? '_출고 처리됨 (마킹 미완료 라인 있음)_' : undefined),
       }).catch((e) => console.warn('[비동기 후처리 실패]', e));
 
       // 온라인 주문 상태 업데이트: 마킹완료 → 출고완료 (마킹 전체 완료 시에만)
@@ -607,9 +639,15 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
     } catch (e: any) {
       setError(`출고 처리 실패: ${e.message || '알 수 없는 오류'}. 잠시 후 다시 시도해주세요.`);
     } finally {
+      confirmingRef.current = false;
       setConfirming(false);
       setConfirmProgress(null);
     }
+  };
+
+  // 음수 재고 경고 모달에서 "계속 진행"
+  const handleConfirmNegative = async () => {
+    await executeShipmentOut(negativeItems);
   };
 
   if (loading && items.length === 0 && workOrders.length === 0) {
@@ -1117,6 +1155,19 @@ export default function ShipmentOut({ currentUser }: { currentUser: AppUser }) {
         </div>
       )}
       </>}
+
+      {/* 음수 재고 경고 모달 */}
+      <NegativeStockWarningModal
+        open={showNegativeWarning}
+        items={negativeItems}
+        confirming={confirming}
+        onCancel={() => {
+          if (confirming) return;
+          setShowNegativeWarning(false);
+          setNegativeItems([]);
+        }}
+        onConfirm={handleConfirmNegative}
+      />
     </div>
   );
 }

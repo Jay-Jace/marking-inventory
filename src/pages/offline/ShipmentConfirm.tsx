@@ -2,6 +2,8 @@ import { type ChangeEvent, useEffect, useRef, useState } from 'react';
 import { supabase } from '../../lib/supabase';
 import { getWarehouseId } from '../../lib/warehouseStore';
 import { recordTransaction, deleteSystemTransactions } from '../../lib/inventoryTransaction';
+import { checkNegativeStock, type StockDeduction } from '../../lib/negativeStockCheck';
+import NegativeStockWarningModal from '../../components/NegativeStockWarningModal';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
 import { AlertTriangle, CheckCircle, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, Edit3, FileUp, Trash2, Truck, XCircle } from 'lucide-react';
@@ -9,7 +11,7 @@ import { generateTemplate, parseQtyExcel, buildMatchKey } from '../../lib/excelU
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import { TwoColumnSkeleton } from '../../components/LoadingSkeleton';
 import { notifySlack } from '../../lib/slackNotify';
-import type { AppUser } from '../../types';
+import type { AppUser, NegativeStockItem } from '../../types';
 
 interface ShipmentItem {
   lineId: string;
@@ -121,6 +123,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
   const [mergedUploadComparison, setMergedUploadComparison] = useState<{ rows: ComparisonRow[]; unmatched: string[] } | null>(null);
   const [showMergedConfirmModal, setShowMergedConfirmModal] = useState(false);
   const mergedFileInputRef = useRef<HTMLInputElement>(null);
+
+  // 음수 재고 경고
+  const [negativeItems, setNegativeItems] = useState<NegativeStockItem[]>([]);
+  const [showNegativeWarning, setShowNegativeWarning] = useState(false);
+  const [pendingNegativeAction, setPendingNegativeAction] = useState<'single' | 'merged' | null>(null);
 
   useEffect(() => {
     loadPendingOrders();
@@ -951,9 +958,47 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
     setShowMergedConfirmModal(true);
   };
 
-  // 통합 뷰 발송 확인 실행 — 날짜순 차감 핵심 로직
-  const handleMergedConfirm = async () => {
+  // 통합 뷰 발송 확인 → 음수 재고 사전 검사
+  const handleMergedConfirmWithCheck = async () => {
     setShowMergedConfirmModal(false);
+    setError(null);
+    try {
+      const whId = await getWarehouseId('오프라인샵');
+      if (!whId) throw new Error('오프라인샵 창고를 찾을 수 없습니다.');
+
+      const activeItems = mergedItems.filter((i) => i.checked && i.sentQty > 0);
+      if (activeItems.length === 0) return;
+
+      // SKU별 총량으로 집계 (merged view는 동일 SKU가 하나로 통합되어 있음)
+      const deductions: StockDeduction[] = activeItems.map((i) => ({
+        warehouseId: whId,
+        warehouseName: '오프라인샵',
+        skuId: i.skuId,
+        skuName: i.skuName,
+        needsMarking: false,
+        deductQty: i.sentQty,
+      }));
+
+      const negatives = await checkNegativeStock(deductions);
+      if (isStale()) return;
+
+      if (negatives.length > 0) {
+        setNegativeItems(negatives);
+        setPendingNegativeAction('merged');
+        setShowNegativeWarning(true);
+        return;
+      }
+
+      await handleMergedConfirm([]);
+    } catch (e: any) {
+      setError(`사전 검사 실패: ${e.message || '알 수 없는 오류'}`);
+    }
+  };
+
+  // 통합 뷰 발송 확인 실행 — 날짜순 차감 핵심 로직
+  const handleMergedConfirm = async (negatives: NegativeStockItem[]) => {
+    setShowMergedConfirmModal(false);
+    setShowNegativeWarning(false);
     setMergedConfirming(true);
     setMergedConfirmProgress(null);
     setError(null);
@@ -1119,13 +1164,15 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
         // 재고 차감은 SKU별 총량으로 1회
         const skuEntries = Object.entries(totalSentBySku);
         const BATCH = 10;
+        const allowNegative = negatives.length > 0;
         for (let i = 0; i < skuEntries.length; i += BATCH) {
           const batch = skuEntries.slice(i, i + BATCH);
           await Promise.all(batch.map(async ([skuId, qty]) => {
             const { data: inv } = await supabase
               .from('inventory').select('quantity')
               .eq('warehouse_id', whId).eq('sku_id', skuId).eq('needs_marking', false).maybeSingle();
-            const newQty = Math.max(0, ((inv as any)?.quantity || 0) - qty);
+            const rawNewQty = ((inv as any)?.quantity || 0) - qty;
+            const newQty = allowNegative ? rawNewQty : Math.max(0, rawNewQty);
             await supabase.from('inventory').upsert(
               { warehouse_id: whId, sku_id: skuId, needs_marking: false, quantity: newQty },
               { onConflict: 'warehouse_id,sku_id,needs_marking' }
@@ -1146,6 +1193,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                 txType: '출고',
                 quantity: qty,
                 source: 'system',
+                needsMarking: false,   // 오프라인샵은 항상 완성품 (needs_marking=false)
                 memo: `발송확인 (작업지시서 ${woDate})`,
               })
             ));
@@ -1168,6 +1216,11 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
             return { skuId, skuName: item?.skuName || skuId, sentQty: qty, needsMarking: item?.needsMarking ?? false };
           });
 
+          // 이 WO에 해당하는 음수 항목 필터 (전체 합산 기준이지만 WO 단위 로그에도 기록)
+          const woNegatives = negatives.filter((n) =>
+            woSkuItems.some((i) => i.skuId === n.skuId)
+          );
+
           await supabase.from('activity_log').insert({
             user_id: currentUser.id,
             action_type: 'shipment_confirm',
@@ -1179,6 +1232,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               items: woSkuItems,
               totalQty: woSkuItems.reduce((s, i) => s + i.sentQty, 0),
               workOrderDate: woDate,
+              hasNegativeStock: woNegatives.length > 0,
+              negativeStockItems: woNegatives.length > 0 ? woNegatives : undefined,
             },
           });
         } catch (logErr) { console.warn('Activity log failed:', logErr); }
@@ -1191,6 +1246,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       setConfirmed(true);
       setConfirmedWoId(null);
       setConfirmedWoDate(null);
+      setNegativeItems([]);
+      setPendingNegativeAction(null);
       loadPendingOrders();
 
       // 슬랙 알림
@@ -1226,9 +1283,51 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
     setShowConfirmModal(true);
   };
 
-  const handleConfirm = async () => {
+  // 발송 확인 버튼 → 음수 재고 사전 검사
+  const handleConfirmWithCheck = async () => {
     if (!selectedWo) return;
     setShowConfirmModal(false);
+    setError(null);
+    try {
+      const whId = await getWarehouseId('오프라인샵');
+      if (!whId) throw new Error('오프라인샵 창고를 찾을 수 없습니다.');
+
+      const finalItems = items.map((item) => ({
+        ...item,
+        sentQty: item.checked ? item.sentQty : 0,
+      }));
+      const activeItems = finalItems.filter((i) => i.sentQty > 0);
+      if (activeItems.length === 0) return;
+
+      const deductions: StockDeduction[] = activeItems.map((i) => ({
+        warehouseId: whId,
+        warehouseName: '오프라인샵',
+        skuId: i.skuId,
+        skuName: i.skuName,
+        needsMarking: false, // 오프라인샵은 항상 needs_marking=false
+        deductQty: i.sentQty,
+      }));
+
+      const negatives = await checkNegativeStock(deductions);
+      if (isStale()) return;
+
+      if (negatives.length > 0) {
+        setNegativeItems(negatives);
+        setPendingNegativeAction('single');
+        setShowNegativeWarning(true);
+        return;
+      }
+
+      await handleConfirm([]);
+    } catch (e: any) {
+      setError(`사전 검사 실패: ${e.message || '알 수 없는 오류'}`);
+    }
+  };
+
+  const handleConfirm = async (negatives: NegativeStockItem[]) => {
+    if (!selectedWo) return;
+    setShowConfirmModal(false);
+    setShowNegativeWarning(false);
     setConfirming(true);
     setConfirmProgress(null);
     setError(null);
@@ -1372,6 +1471,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       if (offWhId3) {
         const whId = offWhId3;
         const activeItems = finalItems.filter((item) => item.sentQty > 0);
+        const allowNegative = negatives.length > 0;
+
         for (let i = 0; i < activeItems.length; i += BATCH) {
           const batch = activeItems.slice(i, i + BATCH);
           setConfirmProgress({ current: batchStep, total: totalBatches, step: `재고 차감 중... (${Math.min(i + BATCH, activeItems.length)} / ${activeItems.length})` });
@@ -1383,7 +1484,9 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               .eq('sku_id', item.skuId)
               .eq('needs_marking', false)
               .maybeSingle();
-            const newQty = Math.max(0, ((inv as any)?.quantity || 0) - item.sentQty);
+            const rawNewQty = ((inv as any)?.quantity || 0) - item.sentQty;
+            // 음수 허용 모드: 실제 음수 저장. 기본: 0 이하 클램프
+            const newQty = allowNegative ? rawNewQty : Math.max(0, rawNewQty);
             await supabase.from('inventory').upsert(
               { warehouse_id: whId, sku_id: item.skuId, needs_marking: false, quantity: newQty },
               { onConflict: 'warehouse_id,sku_id,needs_marking' }
@@ -1394,6 +1497,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
               txType: '출고',
               quantity: item.sentQty,
               source: 'system',
+              needsMarking: false,   // 오프라인샵은 항상 완성품 (needs_marking=false)
               memo: `발송확인 (작업지시서 ${selectedWo.download_date})`,
             });
           }));
@@ -1420,6 +1524,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
             items: finalItems.filter((i) => i.sentQty > 0).map((i) => ({ skuId: i.skuId, skuName: i.skuName, sentQty: i.sentQty, needsMarking: i.needsMarking ?? false })),
             totalQty: finalItems.reduce((s, i) => s + i.sentQty, 0),
             workOrderDate: selectedWo.download_date,
+            hasNegativeStock: negatives.length > 0,
+            negativeStockItems: negatives.length > 0 ? negatives : undefined,
           },
         });
       } catch (logErr) { console.warn('Activity log failed:', logErr); }
@@ -1427,6 +1533,8 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
       setConfirmedWoId(selectedWo.id);
       setConfirmedWoDate(selectedWo.download_date);
       setConfirmed(true);
+      setNegativeItems([]);
+      setPendingNegativeAction(null);
       loadPendingOrders();
 
       // 슬랙 알림 (실패해도 무시)
@@ -2491,7 +2599,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                 취소
               </button>
               <button
-                onClick={handleConfirm}
+                onClick={handleConfirmWithCheck}
                 className="flex-1 py-2.5 bg-blue-600 text-white rounded-xl text-sm font-semibold hover:bg-blue-700"
               >
                 발송 확인
@@ -2542,7 +2650,7 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
                 취소
               </button>
               <button
-                onClick={handleMergedConfirm}
+                onClick={handleMergedConfirmWithCheck}
                 className="flex-1 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700"
               >
                 전체 발송 확인
@@ -2641,6 +2749,26 @@ export default function ShipmentConfirm({ currentUser }: { currentUser: AppUser 
 
       {/* ── 삭제 확인 모달 ── */}
       <DeleteConfirmModal />
+
+      {/* ── 음수 재고 경고 모달 ── */}
+      <NegativeStockWarningModal
+        open={showNegativeWarning}
+        items={negativeItems}
+        confirming={confirming || mergedConfirming}
+        onCancel={() => {
+          if (confirming || mergedConfirming) return;
+          setShowNegativeWarning(false);
+          setNegativeItems([]);
+          setPendingNegativeAction(null);
+        }}
+        onConfirm={() => {
+          if (pendingNegativeAction === 'merged') {
+            handleMergedConfirm(negativeItems);
+          } else {
+            handleConfirm(negativeItems);
+          }
+        }}
+      />
     </div>
   );
 }
