@@ -10,7 +10,9 @@ import { generateTemplate, parseQtyExcel } from '../../lib/excelUtils';
 import ComparisonPanel, { type ComparisonRow } from '../../components/ComparisonPanel';
 import { TableSkeleton } from '../../components/LoadingSkeleton';
 import { notifySlack } from '../../lib/slackNotify';
-import type { AppUser } from '../../types';
+import { checkNegativeStock, type StockDeduction } from '../../lib/negativeStockCheck';
+import NegativeStockWarningModal from '../../components/NegativeStockWarningModal';
+import type { AppUser, NegativeStockItem } from '../../types';
 import ManualMarking from './ManualMarking';
 import {
   AlertTriangle,
@@ -135,6 +137,12 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   const [showOverprocessWarning, setShowOverprocessWarning] = useState(false);
   const [overprocessWarnings, setOverprocessWarnings] = useState<OverprocessWarning[]>([]);
   const [pendingSaveType, setPendingSaveType] = useState<'single' | 'merged' | null>(null);
+
+  // 음수 재고 경고 관련
+  const [showNegativeWarning, setShowNegativeWarning] = useState(false);
+  const [negativeItems, setNegativeItems] = useState<NegativeStockItem[]>([]);
+  const [pendingNegativeAction, setPendingNegativeAction] = useState<'single' | 'merged' | null>(null);
+  const [negativeConfirming, setNegativeConfirming] = useState(false);
 
   // 이력 삭제
   const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -558,7 +566,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
   };
 
   // 통합 뷰 저장 — 날짜순 차감
-  const handleMergedSave = async () => {
+  const handleMergedSave = async (negatives: NegativeStockItem[] = []) => {
     setMergedSaving(true);
     setMergedSaveProgress(null);
     setError(null);
@@ -715,7 +723,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         }
 
         if (txRows.length > 0) {
-          await recordTransactionBatch(txRows);
+          await recordTransactionBatch(txRows, { allowNegative: negatives.length > 0 });
         }
       }
 
@@ -746,7 +754,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         try {
           const woDate = orders.find((w) => w.id === woId)?.download_date || '';
           const woItems = diffs.filter((d) => d.workOrderId === woId);
-          const logSummary = {
+          const logSummary: any = {
             mergedWork: true,
             items: woItems.map((d) => ({
               skuId: d.finishedSkuId,
@@ -756,6 +764,10 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
             totalQty: woItems.reduce((s, d) => s + d.todayQty, 0),
             workOrderDate: woDate,
           };
+          if (negatives.length > 0) {
+            logSummary.hasNegativeStock = true;
+            logSummary.negativeStockItems = negatives;
+          }
           const { data: existingLog } = await supabase
             .from('activity_log')
             .select('id')
@@ -967,18 +979,248 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
       setPendingSaveType('merged');
       setShowOverprocessWarning(true);
     } else {
-      handleMergedSave();
+      checkMergedNegativeStock();
     }
   };
 
   const confirmOverprocessSave = () => {
     setShowOverprocessWarning(false);
-    if (pendingSaveType === 'single') handleSave();
-    else if (pendingSaveType === 'merged') handleMergedSave();
+    if (pendingSaveType === 'single') checkSingleNegativeStock();
+    else if (pendingSaveType === 'merged') checkMergedNegativeStock();
     setPendingSaveType(null);
   };
 
-  const handleSave = async () => {
+  /**
+   * 단일 저장(handleSave) 전 음수 재고 사전 체크.
+   * 예정 항목은 bomMap, 예정 외 항목은 별도 BOM 조회.
+   */
+  const checkSingleNegativeStock = async () => {
+    if (!selectedOrder) return;
+    try {
+      const activeItems = items.filter((item) => item.todayQty > 0);
+      if (activeItems.length === 0) return;
+
+      const pwWhId = await getWarehouseId('플레이위즈');
+      if (!pwWhId) {
+        await handleSave([]);
+        return;
+      }
+
+      const regularItems = activeItems.filter((item) => !item.lineId.startsWith('_extra_'));
+      const extraItems = activeItems.filter((item) => item.lineId.startsWith('_extra_'));
+
+      // 예정 항목의 diff 계산 (기존 daily_marking 차감)
+      const lineIds = regularItems.map((item) => item.lineId);
+      const { data: dmData } = lineIds.length > 0
+        ? await supabase.from('daily_marking').select('work_order_line_id, completed_qty')
+            .eq('date', today).in('work_order_line_id', lineIds)
+        : { data: [] };
+      const existingDmMap = new Map(((dmData || []) as any[]).map((dm: any) => [dm.work_order_line_id, dm.completed_qty]));
+
+      // 예정 외 항목 BOM 조회
+      let extraBomMap: Record<string, { componentSkuId: string; quantity: number }[]> = {};
+      if (extraItems.length > 0) {
+        const extraSkus = extraItems.map((i) => i.finishedSkuId);
+        const { data: extraBoms } = await supabase.from('bom')
+          .select('finished_sku_id, component_sku_id, quantity')
+          .in('finished_sku_id', extraSkus);
+        for (const b of (extraBoms || []) as any[]) {
+          if (!extraBomMap[b.finished_sku_id]) extraBomMap[b.finished_sku_id] = [];
+          extraBomMap[b.finished_sku_id].push({ componentSkuId: b.component_sku_id, quantity: b.quantity });
+        }
+      }
+
+      // 구성품 차감량 집계
+      const componentDeductMap: Record<string, number> = {};
+      for (const item of regularItems) {
+        const previousQty = existingDmMap.get(item.lineId) || 0;
+        const diff = item.todayQty - previousQty;
+        if (diff <= 0) continue;
+        const components = bomMap[item.finishedSkuId] || [];
+        for (const comp of components) {
+          const q = comp.quantity * diff;
+          componentDeductMap[comp.componentSkuId] = (componentDeductMap[comp.componentSkuId] || 0) + q;
+        }
+      }
+      for (const extra of extraItems) {
+        const components = extraBomMap[extra.finishedSkuId] || [];
+        for (const comp of components) {
+          const q = comp.quantity * extra.todayQty;
+          componentDeductMap[comp.componentSkuId] = (componentDeductMap[comp.componentSkuId] || 0) + q;
+        }
+      }
+
+      const componentSkuIds = Object.keys(componentDeductMap);
+      if (componentSkuIds.length === 0) {
+        await handleSave([]);
+        return;
+      }
+
+      // 구성품 SKU 이름 조회
+      const { data: skuInfo } = await supabase.from('sku').select('sku_id, sku_name').in('sku_id', componentSkuIds);
+      const skuNameMap = new Map(((skuInfo || []) as any[]).map((s: any) => [s.sku_id, s.sku_name]));
+
+      const deductions: StockDeduction[] = componentSkuIds.map((skuId) => ({
+        warehouseId: pwWhId,
+        warehouseName: '플레이위즈',
+        skuId,
+        skuName: skuNameMap.get(skuId) || skuId,
+        needsMarking: true,
+        deductQty: componentDeductMap[skuId],
+      }));
+
+      const negatives = await checkNegativeStock(deductions);
+      if (negatives.length === 0) {
+        await handleSave([]);
+      } else {
+        setNegativeItems(negatives);
+        setPendingNegativeAction('single');
+        setShowNegativeWarning(true);
+      }
+    } catch (e: any) {
+      setError(`음수 재고 체크 실패: ${e.message || '알 수 없는 오류'}`);
+    }
+  };
+
+  /**
+   * 통합 저장(handleMergedSave) 전 음수 재고 사전 체크.
+   * 날짜순 lineAllocation을 계산해 예정/예정외 구성품 차감량을 집계.
+   */
+  const checkMergedNegativeStock = async () => {
+    try {
+      const activeItems = mergedItems.filter((item) => item.todayQty > 0);
+      if (activeItems.length === 0) return;
+
+      const pwWhId = await getWarehouseId('플레이위즈');
+      if (!pwWhId) {
+        await handleMergedSave([]);
+        return;
+      }
+
+      // Step A: todayQty를 WO별 라인에 분배 (날짜순) — handleMergedSave와 동일 로직
+      const lineAllocation: Record<string, number> = {};
+      for (const item of activeItems) {
+        let remaining = item.todayQty;
+        for (const src of item.sources) {
+          if (remaining <= 0) break;
+          const alloc = Math.min(src.availableQty, remaining);
+          if (alloc > 0) {
+            lineAllocation[src.lineId] = (lineAllocation[src.lineId] || 0) + alloc;
+            remaining -= alloc;
+          }
+        }
+      }
+
+      const affectedLineIds = Object.keys(lineAllocation);
+      const [dmResult, lineResult] = await Promise.all([
+        affectedLineIds.length > 0
+          ? supabase.from('daily_marking').select('work_order_line_id, completed_qty')
+              .eq('date', today).in('work_order_line_id', affectedLineIds)
+          : Promise.resolve({ data: [] as any[] }),
+        affectedLineIds.length > 0
+          ? supabase.from('work_order_line').select('id, finished_sku_id').in('id', affectedLineIds)
+          : Promise.resolve({ data: [] as any[] }),
+      ]);
+      const existingDmMap = new Map(((dmResult.data || []) as any[]).map((dm: any) => [dm.work_order_line_id, dm.completed_qty]));
+      const finSkuMap = new Map(((lineResult.data || []) as any[]).map((l: any) => [l.id, l.finished_sku_id]));
+
+      // SKU별 diff 합산 (예정 항목)
+      const skuDiffMap: Record<string, number> = {};
+      for (const [lineId, allocQty] of Object.entries(lineAllocation)) {
+        const previousQty = existingDmMap.get(lineId) || 0;
+        const diff = allocQty - previousQty;
+        if (diff <= 0) continue;
+        const finSkuId = finSkuMap.get(lineId);
+        if (!finSkuId) continue;
+        skuDiffMap[finSkuId] = (skuDiffMap[finSkuId] || 0) + diff;
+      }
+
+      // 예정 외 항목 BOM 조회
+      const extraMerged = activeItems.filter((i) => i.sources.length === 0 && i.todayQty > 0);
+      let extraBomMap: Record<string, { componentSkuId: string; quantity: number }[]> = {};
+      if (extraMerged.length > 0) {
+        const extraSkus = extraMerged.map((i) => i.finishedSkuId);
+        const { data: extraBoms } = await supabase.from('bom')
+          .select('finished_sku_id, component_sku_id, quantity')
+          .in('finished_sku_id', extraSkus);
+        for (const b of (extraBoms || []) as any[]) {
+          if (!extraBomMap[b.finished_sku_id]) extraBomMap[b.finished_sku_id] = [];
+          extraBomMap[b.finished_sku_id].push({ componentSkuId: b.component_sku_id, quantity: b.quantity });
+        }
+      }
+
+      // 구성품 차감량 집계
+      const componentDeductMap: Record<string, number> = {};
+      for (const [skuId, totalDiff] of Object.entries(skuDiffMap)) {
+        const components = bomMap[skuId] || [];
+        for (const comp of components) {
+          const q = comp.quantity * totalDiff;
+          componentDeductMap[comp.componentSkuId] = (componentDeductMap[comp.componentSkuId] || 0) + q;
+        }
+      }
+      for (const extra of extraMerged) {
+        const components = extraBomMap[extra.finishedSkuId] || [];
+        for (const comp of components) {
+          const q = comp.quantity * extra.todayQty;
+          componentDeductMap[comp.componentSkuId] = (componentDeductMap[comp.componentSkuId] || 0) + q;
+        }
+      }
+
+      const componentSkuIds = Object.keys(componentDeductMap);
+      if (componentSkuIds.length === 0) {
+        await handleMergedSave([]);
+        return;
+      }
+
+      // 구성품 SKU 이름 조회
+      const { data: skuInfo } = await supabase.from('sku').select('sku_id, sku_name').in('sku_id', componentSkuIds);
+      const skuNameMap = new Map(((skuInfo || []) as any[]).map((s: any) => [s.sku_id, s.sku_name]));
+
+      const deductions: StockDeduction[] = componentSkuIds.map((skuId) => ({
+        warehouseId: pwWhId,
+        warehouseName: '플레이위즈',
+        skuId,
+        skuName: skuNameMap.get(skuId) || skuId,
+        needsMarking: true,
+        deductQty: componentDeductMap[skuId],
+      }));
+
+      const negatives = await checkNegativeStock(deductions);
+      if (negatives.length === 0) {
+        await handleMergedSave([]);
+      } else {
+        setNegativeItems(negatives);
+        setPendingNegativeAction('merged');
+        setShowNegativeWarning(true);
+      }
+    } catch (e: any) {
+      setError(`음수 재고 체크 실패: ${e.message || '알 수 없는 오류'}`);
+    }
+  };
+
+  const confirmNegativeSave = async () => {
+    setNegativeConfirming(true);
+    try {
+      setShowNegativeWarning(false);
+      if (pendingNegativeAction === 'merged') {
+        await handleMergedSave(negativeItems);
+      } else if (pendingNegativeAction === 'single') {
+        await handleSave(negativeItems);
+      }
+    } finally {
+      setPendingNegativeAction(null);
+      setNegativeItems([]);
+      setNegativeConfirming(false);
+    }
+  };
+
+  const cancelNegativeSave = () => {
+    setShowNegativeWarning(false);
+    setPendingNegativeAction(null);
+    setNegativeItems([]);
+  };
+
+  const handleSave = async (negatives: NegativeStockItem[] = []) => {
     if (!selectedOrder) return;
     setError(null);
     try {
@@ -1115,7 +1357,7 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           });
         }
         if (txRows.length > 0) {
-          await recordTransactionBatch(txRows);
+          await recordTransactionBatch(txRows, { allowNegative: negatives.length > 0 });
         }
       }
 
@@ -1142,12 +1384,16 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
           skuId: item.finishedSkuId, skuName: item.skuName, completedQty: item.todayQty,
           isExtra: item.lineId.startsWith('_extra_'),
         }));
-        const logSummary = {
+        const logSummary: any = {
           items: logItems,
           totalQty: logItems.reduce((s, i) => s + i.completedQty, 0),
           workOrderDate: selectedOrder.download_date,
           extraItems: extraItems.length > 0 ? extraItems.map((i) => ({ skuId: i.finishedSkuId, skuName: i.skuName, qty: i.todayQty })) : undefined,
         };
+        if (negatives.length > 0) {
+          logSummary.hasNegativeStock = true;
+          logSummary.negativeStockItems = negatives;
+        }
         const { data: existingLog } = await supabase
           .from('activity_log')
           .select('id')
@@ -2061,6 +2307,15 @@ export default function MarkingWork({ currentUser }: { currentUser: AppUser }) {
         </div>
       )}
       </>)}
+
+      {/* 음수 재고 발생 경고 모달 (구성품 재고 부족) */}
+      <NegativeStockWarningModal
+        open={showNegativeWarning}
+        items={negativeItems}
+        onCancel={cancelNegativeSave}
+        onConfirm={confirmNegativeSave}
+        confirming={negativeConfirming}
+      />
     </div>
   );
 }

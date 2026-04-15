@@ -3,9 +3,11 @@ import { supabase } from '../../lib/supabase';
 import { getWarehouseId } from '../../lib/warehouseStore';
 import { recordTransactionBatch } from '../../lib/inventoryTransaction';
 import type { RecordTxParams } from '../../lib/inventoryTransaction';
+import { checkNegativeStock, type StockDeduction } from '../../lib/negativeStockCheck';
+import NegativeStockWarningModal from '../../components/NegativeStockWarningModal';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
 import { useLoadingTimeout } from '../../hooks/useLoadingTimeout';
-import type { AppUser } from '../../types';
+import type { AppUser, NegativeStockItem } from '../../types';
 import { AlertTriangle, CheckCircle, FileUp, Search, ArrowRight, Package } from 'lucide-react';
 
 interface TransferItem {
@@ -25,8 +27,13 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const savingRef = useRef(false);
   const isStale = useStaleGuard();
   useLoadingTimeout(loading, setLoading, setError);
+
+  // 음수 재고 경고
+  const [negativeItems, setNegativeItems] = useState<NegativeStockItem[]>([]);
+  const [showNegativeWarning, setShowNegativeWarning] = useState(false);
 
   const today = new Date().toISOString().split('T')[0];
 
@@ -130,13 +137,51 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
     );
   };
 
-  // 이관 실행
+  // 이관 실행 (Step 1: 사전 검사 → 음수 있으면 모달, 없으면 즉시 저장)
   const handleTransfer = async () => {
+    if (savingRef.current) return;
     const activeItems = items.filter((i) => i.transferQty > 0);
     if (activeItems.length === 0) return;
 
-    setSaving(true);
     setError(null);
+    try {
+      const pwId = await getWarehouseId('플레이위즈');
+      if (!pwId) throw new Error('플레이위즈 창고를 찾을 수 없습니다.');
+
+      // 플레이위즈 출고분만 음수 체크 (오프라인은 입고만 발생)
+      const deductions: StockDeduction[] = activeItems.map((i) => ({
+        warehouseId: pwId,
+        warehouseName: '플레이위즈',
+        skuId: i.skuId,
+        skuName: i.skuName,
+        needsMarking: i.needsMarking,
+        deductQty: i.transferQty,
+      }));
+
+      const negatives = await checkNegativeStock(deductions);
+      if (isStale()) return;
+
+      if (negatives.length > 0) {
+        setNegativeItems(negatives);
+        setShowNegativeWarning(true);
+        return; // 모달에서 사용자 확인 기다림
+      }
+
+      // 음수 없음 → 즉시 저장
+      await executeTransfer(activeItems, []);
+    } catch (err: any) {
+      setError(err.message || '이관 실패');
+    }
+  };
+
+  // 실제 저장 로직 (Step 2: 음수 여부와 관계없이 저장)
+  const executeTransfer = async (
+    activeItems: TransferItem[],
+    negatives: NegativeStockItem[]
+  ) => {
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
     try {
       const [pwId, offId] = await Promise.all([
         getWarehouseId('플레이위즈'),
@@ -168,7 +213,10 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
         });
       }
 
-      await recordTransactionBatch(txRows);
+      // 음수 허용 여부: 경고 모달에서 사용자가 승인한 경우만 true
+      await recordTransactionBatch(txRows, undefined, undefined, {
+        allowNegative: negatives.length > 0,
+      });
 
       // Activity log
       await supabase.from('activity_log').insert({
@@ -180,15 +228,27 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
           transferToShop: true,
           items: activeItems.map((i) => ({ skuId: i.skuId, skuName: i.skuName, qty: i.transferQty })),
           totalQty: activeItems.reduce((s, i) => s + i.transferQty, 0),
+          hasNegativeStock: negatives.length > 0,
+          negativeStockItems: negatives.length > 0 ? negatives : undefined,
         },
       });
 
+      if (isStale()) return;
+      setShowNegativeWarning(false);
+      setNegativeItems([]);
       setSaved(true);
     } catch (err: any) {
       setError(err.message || '이관 실패');
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
+  };
+
+  // 음수 재고 경고 모달에서 "계속 진행" 선택
+  const handleConfirmNegative = async () => {
+    const activeItems = items.filter((i) => i.transferQty > 0);
+    await executeTransfer(activeItems, negativeItems);
   };
 
   const activeItems = items.filter((i) => i.transferQty > 0);
@@ -294,6 +354,19 @@ export default function TransferToShop({ currentUser }: { currentUser: AppUser }
           </button>
         </>
       )}
+
+      {/* 음수 재고 경고 모달 */}
+      <NegativeStockWarningModal
+        open={showNegativeWarning}
+        items={negativeItems}
+        confirming={saving}
+        onCancel={() => {
+          if (saving) return;
+          setShowNegativeWarning(false);
+          setNegativeItems([]);
+        }}
+        onConfirm={handleConfirmNegative}
+      />
     </div>
   );
 }

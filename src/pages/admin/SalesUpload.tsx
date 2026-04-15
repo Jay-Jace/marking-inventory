@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../../lib/supabase';
 import { getWarehouses } from '../../lib/warehouseStore';
 import { useStaleGuard } from '../../hooks/useStaleGuard';
-import { recordTransactionBatch } from '../../lib/inventoryTransaction';
+import { recordTransactionBatch, deleteOfflineManualTransactions, previewOfflineManualDelete } from '../../lib/inventoryTransaction';
 import type { TxType } from '../../types';
 import * as XLSX from 'xlsx';
 import { useReadOnly } from '../../contexts/ReadOnlyContext';
@@ -15,15 +15,31 @@ import {
   Calendar,
   FileUp,
   Upload,
+  Settings,
+  Plus,
+  X,
+  Search,
 } from 'lucide-react';
 
-// 4개 탭 정의
+// 5개 탭 정의 (재고조정 포함 - 음수 허용)
 const TX_TABS = [
   { key: '입고' as TxType, label: '입고', icon: ArrowDownCircle, color: 'blue', desc: '제작 입고 (직입고)' },
   { key: '이동입고' as TxType, label: '이동입고', icon: ArrowDownCircle, color: 'teal', desc: '타 매장/창고에서 이동 입고' },
   { key: '판매' as TxType, label: '판매', icon: ShoppingCart, color: 'emerald', desc: '매장 판매 출고' },
   { key: '출고' as TxType, label: '이동출고', icon: Truck, color: 'orange', desc: '타 매장/창고로 이동 출고' },
+  { key: '재고조정' as TxType, label: '재고조정', icon: Settings, color: 'yellow', desc: '실사 보정 (±차이값) — 양수=증가, 음수=감소' },
 ] as const;
+
+/** 재고조정 탭 - 직접 입력용 1행 */
+interface ManualRow {
+  id: string;       // 로컬 고유 ID (삭제용)
+  skuId: string;
+  skuName: string;
+  quantity: number; // ±값 (0은 저장 시 제외)
+  reason?: string;  // 선택: 실사차이/파손/분실/기타
+}
+
+const ADJUST_REASONS = ['실사차이', '파손', '분실', '기타'] as const;
 
 interface ParsedRow {
   barcode: string;
@@ -98,9 +114,27 @@ export default function SalesUpload() {
   const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
 
   // 삭제 모달
-  const [deleteModal, setDeleteModal] = useState<{ date: string; txType: string; count: number } | null>(null);
+  const [deleteModal, setDeleteModal] = useState<{
+    date: string;
+    txType: string;
+    count: number;
+    preview?: Array<{
+      skuId: string;
+      skuName: string;
+      currentQty: number;
+      deltaChange: number;
+      afterQty: number;
+    }>;
+    previewLoading?: boolean;
+  } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+
+  // 재고조정 탭 - 직접 입력
+  const [manualRows, setManualRows] = useState<ManualRow[]>([]);
+  const [skuSearch, setSkuSearch] = useState('');
+  const [skuSearchResults, setSkuSearchResults] = useState<{ sku_id: string; sku_name: string }[]>([]);
+  const [searching, setSearching] = useState(false);
 
   // 창고 조회 (캐시 우선)
   useEffect(() => {
@@ -143,6 +177,54 @@ export default function SalesUpload() {
   }, [offlineWarehouse, isStale]);
 
   useEffect(() => { if (offlineWarehouse) fetchTxStatus(); }, [offlineWarehouse, fetchTxStatus]);
+
+  // 재고조정 - SKU 검색 디바운스 (300ms)
+  useEffect(() => {
+    if (activeTab !== '재고조정') return;
+    const keyword = skuSearch.trim();
+    if (keyword.length < 2) {
+      setSkuSearchResults([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const { data } = await supabase
+          .from('sku')
+          .select('sku_id, sku_name')
+          .or(`sku_id.ilike.%${keyword}%,sku_name.ilike.%${keyword}%`)
+          .limit(10);
+        setSkuSearchResults(data || []);
+      } catch (err) {
+        console.error('SKU 검색 오류:', err);
+        setSkuSearchResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [skuSearch, activeTab]);
+
+  // 재고조정 - 행 추가 (중복 SKU면 기존 행 포커스만)
+  const addManualRow = (sku: { sku_id: string; sku_name: string }) => {
+    setManualRows((prev) => {
+      if (prev.some((r) => r.skuId === sku.sku_id)) return prev;
+      return [
+        ...prev,
+        { id: `${sku.sku_id}-${Date.now()}`, skuId: sku.sku_id, skuName: sku.sku_name || sku.sku_id, quantity: 0 },
+      ];
+    });
+    setSkuSearch('');
+    setSkuSearchResults([]);
+  };
+
+  const updateManualRow = (id: string, patch: Partial<ManualRow>) => {
+    setManualRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  };
+
+  const removeManualRow = (id: string) => {
+    setManualRows((prev) => prev.filter((r) => r.id !== id));
+  };
 
   // 매장판매일보 감지 상태
   const [isPosDaily, setIsPosDaily] = useState(false);
@@ -323,9 +405,10 @@ export default function SalesUpload() {
           // 판매 탭에서 음수 수량 → 반품으로 자동 전환
           if (qty < 0 && activeTab === '판매') {
             rows.push({ barcode, quantity: Math.abs(qty), txType: '반품' as TxType, saleType: '반품', saleDate: rowDate });
-          } else if (qty < 0) {
-            continue; // 다른 탭에서는 음수 무시
+          } else if (qty < 0 && activeTab !== '재고조정') {
+            continue; // 재고조정 외의 탭은 음수 무시
           } else {
+            // 재고조정 탭은 음수(-N) 그대로 보존 / 다른 탭은 양수
             rows.push({ barcode, quantity: qty, saleDate: rowDate, txType: activeTab });
           }
         }
@@ -397,32 +480,59 @@ export default function SalesUpload() {
   const handleSave = async () => {
     if (!offlineWarehouse) return;
     const matched = parsedRows.filter((r) => r.matched && r.skuId);
-    if (matched.length === 0) return;
+    // 재고조정 탭일 때만 직접 입력 행 포함 (quantity !== 0)
+    const manual = activeTab === '재고조정'
+      ? manualRows.filter((m) => m.quantity !== 0 && m.skuId)
+      : [];
+    if (matched.length === 0 && manual.length === 0) return;
 
     setUploading(true);
     setUploadResult('저장 중...');
 
     try {
-      const txRows = matched.map((r) => ({
+      const excelTxRows = matched.map((r) => ({
         warehouseId: offlineWarehouse.id,
         skuId: r.skuId!,
         txType: r.txType!,
         quantity: r.quantity,
         source: 'offline_manual' as const,
         txDate: r.saleDate || txDate,
-        memo: `매장입출고:${r.saleDate || txDate}:${r.saleType || activeTabInfo.label}`,
+        memo: activeTab === '재고조정'
+          ? `재고조정:${r.saleDate || txDate}`
+          : `매장입출고:${r.saleDate || txDate}:${r.saleType || activeTabInfo.label}`,
       }));
+
+      const manualTxRows = manual.map((m) => ({
+        warehouseId: offlineWarehouse.id,
+        skuId: m.skuId,
+        txType: '재고조정' as TxType,
+        quantity: m.quantity,
+        source: 'offline_manual' as const,
+        txDate: txDate,
+        memo: `재고조정:${txDate}${m.reason ? `:${m.reason}` : ''}`,
+      }));
+
+      const txRows = [...excelTxRows, ...manualTxRows];
 
       const skuNameMap = new Map<string, string>();
       for (const r of matched) {
         if (r.skuId && r.skuName) skuNameMap.set(r.skuId, r.skuName);
       }
+      for (const m of manual) {
+        skuNameMap.set(m.skuId, m.skuName);
+      }
 
-      const result = await recordTransactionBatch(txRows, skuNameMap);
+      const result = await recordTransactionBatch(
+        txRows,
+        skuNameMap,
+        undefined,
+        { allowNegative: activeTab === '재고조정' }
+      );
       setUploadResult(
         `저장 완료: ${result.success}건 성공${result.failed > 0 ? `, ${result.failed}건 실패` : ''}`
       );
       setParsedRows([]);
+      setManualRows([]);
       fetchTxStatus();
     } catch (err: any) {
       setUploadResult(`저장 실패: ${err.message}`);
@@ -431,38 +541,41 @@ export default function SalesUpload() {
     }
   };
 
-  // 삭제
+  // 삭제 — 미리보기 로드 후 모달 표시
   const openDeleteModal = async (date: string, txType: string) => {
     if (!offlineWarehouse) return;
     const dbTxType = txType === '이동출고' ? '출고' : txType;
-    const { count } = await supabase
-      .from('inventory_transaction')
-      .select('id', { count: 'exact', head: true })
-      .eq('warehouse_id', offlineWarehouse.id)
-      .eq('source', 'offline_manual')
-      .eq('tx_type', dbTxType)
-      .eq('tx_date', date);
-    setDeleteModal({ date, txType, count: count || 0 });
+    // 모달 먼저 열고 로딩 표시 (UX 지연 방지)
+    setDeleteModal({ date, txType, count: 0, previewLoading: true });
     setDeleteConfirm(false);
+    try {
+      const result = await previewOfflineManualDelete({
+        warehouseId: offlineWarehouse.id,
+        txType: dbTxType as TxType,
+        txDate: date,
+      });
+      setDeleteModal({ date, txType, count: result.count, preview: result.preview, previewLoading: false });
+    } catch {
+      setDeleteModal({ date, txType, count: 0, previewLoading: false });
+    }
   };
 
+  // 삭제 실행 — inventory 역반영 + 트랜잭션 삭제
   const handleDelete = async () => {
     if (!deleteModal || !offlineWarehouse) return;
     setDeleting(true);
     const dbTxType = deleteModal.txType === '이동출고' ? '출고' : deleteModal.txType;
-    const { error } = await supabase
-      .from('inventory_transaction')
-      .delete()
-      .eq('warehouse_id', offlineWarehouse.id)
-      .eq('source', 'offline_manual')
-      .eq('tx_type', dbTxType)
-      .eq('tx_date', deleteModal.date);
+    const { deleted, error } = await deleteOfflineManualTransactions({
+      warehouseId: offlineWarehouse.id,
+      txType: dbTxType as TxType,
+      txDate: deleteModal.date,
+    });
     setDeleting(false);
     setDeleteModal(null);
     if (error) {
-      setUploadResult(`삭제 실패: ${error.message}`);
+      setUploadResult(`삭제 실패: ${error}`);
     } else {
-      setUploadResult(`${deleteModal.date} ${deleteModal.txType} 데이터 삭제 완료`);
+      setUploadResult(`${deleteModal.date} ${deleteModal.txType} 데이터 ${deleted}건 삭제 + 재고 복구 완료`);
     }
     fetchTxStatus();
   };
@@ -470,8 +583,20 @@ export default function SalesUpload() {
   // 통계
   const matchedRows = parsedRows.filter((r) => r.matched);
   const unmatchedRows = parsedRows.filter((r) => !r.matched);
-  const matchedQty = matchedRows.reduce((s, r) => s + r.quantity, 0);
-  const unmatchedQty = unmatchedRows.reduce((s, r) => s + r.quantity, 0);
+  const matchedQty = matchedRows.reduce((s, r) => s + Math.abs(r.quantity), 0);
+  const unmatchedQty = unmatchedRows.reduce((s, r) => s + Math.abs(r.quantity), 0);
+
+  // 재고조정 - 증가/감소 분리 집계 (엑셀 + 직접 입력 통합)
+  const isAdjust = activeTab === '재고조정';
+  const adjustRowsCombined = isAdjust
+    ? [
+        ...matchedRows.map((r) => ({ qty: r.quantity })),
+        ...manualRows.filter((m) => m.quantity !== 0 && m.skuId).map((m) => ({ qty: m.quantity })),
+      ]
+    : [];
+  const adjustIncrease = adjustRowsCombined.filter((r) => r.qty > 0).reduce((s, r) => s + r.qty, 0);
+  const adjustDecrease = adjustRowsCombined.filter((r) => r.qty < 0).reduce((s, r) => s + Math.abs(r.qty), 0);
+  const adjustCount = adjustRowsCombined.length;
 
   // 탭별 색상
   const tabColor = activeTabInfo.color;
@@ -498,7 +623,14 @@ export default function SalesUpload() {
           return (
             <button
               key={tab.key}
-              onClick={() => { setActiveTab(tab.key); setParsedRows([]); setUploadResult(null); }}
+              onClick={() => {
+                setActiveTab(tab.key);
+                setParsedRows([]);
+                setUploadResult(null);
+                setManualRows([]);
+                setSkuSearch('');
+                setSkuSearchResults([]);
+              }}
               className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-sm font-medium transition-all ${
                 isActive
                   ? `bg-white shadow-sm text-${tab.color}-700`
@@ -548,7 +680,152 @@ export default function SalesUpload() {
             className="hidden"
           />
         </label>
+        {isAdjust && (
+          <p className="text-xs text-gray-500 mt-2">
+            엑셀 양식: [바코드, 수량] · 수량은 <b className="text-blue-600">+증가</b> / <b className="text-red-600">-감소</b>의 차이값(±N). 0은 무시됩니다.
+          </p>
+        )}
       </div>
+
+      {/* 재고조정 직접 입력 영역 */}
+      {isAdjust && (
+        <div className="bg-white rounded-xl p-5 shadow-sm border border-yellow-200 mb-4">
+          <div className="flex items-center justify-between mb-3">
+            <div>
+              <h3 className="text-sm font-semibold text-yellow-700">직접 입력</h3>
+              <p className="text-xs text-gray-500 mt-1">SKU를 검색해 추가 후 ±차이값을 입력하세요. (0은 저장에서 자동 제외)</p>
+            </div>
+            {manualRows.length > 0 && (
+              <span className="text-xs text-gray-500">
+                {manualRows.length}종 · <span className="text-blue-700">+{manualRows.filter(m => m.quantity > 0).reduce((s, m) => s + m.quantity, 0)}</span>
+                {' / '}
+                <span className="text-red-700">-{manualRows.filter(m => m.quantity < 0).reduce((s, m) => s + Math.abs(m.quantity), 0)}</span>
+              </span>
+            )}
+          </div>
+
+          {/* SKU 검색 */}
+          <div className="relative mb-3">
+            <div className="flex items-center gap-2 border border-gray-300 rounded-lg px-3 py-2 bg-white">
+              <Search className="w-4 h-4 text-gray-400" />
+              <input
+                type="text"
+                value={skuSearch}
+                onChange={(e) => setSkuSearch(e.target.value)}
+                placeholder="SKU 코드 또는 상품명 (2자 이상)"
+                className="flex-1 outline-none text-sm"
+                disabled={readOnly}
+              />
+              {searching && <span className="text-xs text-gray-400">검색 중...</span>}
+            </div>
+            {skuSearchResults.length > 0 && (
+              <div className="absolute z-10 left-0 right-0 mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-64 overflow-y-auto">
+                {skuSearchResults.map((s) => {
+                  const already = manualRows.some((r) => r.skuId === s.sku_id);
+                  return (
+                    <button
+                      key={s.sku_id}
+                      onClick={() => addManualRow(s)}
+                      disabled={already}
+                      className={`w-full text-left px-3 py-2 text-sm flex items-center justify-between border-b border-gray-100 last:border-b-0 ${
+                        already ? 'bg-gray-50 text-gray-400 cursor-not-allowed' : 'hover:bg-yellow-50'
+                      }`}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="font-mono text-xs text-gray-500">{s.sku_id}</div>
+                        <div className="truncate text-gray-900">{s.sku_name || '-'}</div>
+                      </div>
+                      {already ? (
+                        <span className="text-xs text-gray-400 ml-2">추가됨</span>
+                      ) : (
+                        <Plus className="w-4 h-4 text-yellow-600 ml-2" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* 직접 입력 행 테이블 */}
+          {manualRows.length > 0 ? (
+            <div className="border border-gray-200 rounded-lg overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium text-gray-600 text-xs">SKU</th>
+                    <th className="px-3 py-2 text-left font-medium text-gray-600 text-xs">상품명</th>
+                    <th className="px-3 py-2 text-right font-medium text-gray-600 text-xs w-32">수량 (±)</th>
+                    <th className="px-3 py-2 text-left font-medium text-gray-600 text-xs w-28">사유</th>
+                    <th className="w-10"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {manualRows.map((row) => {
+                    const qtyColor = row.quantity > 0 ? 'border-blue-300 bg-blue-50 text-blue-700'
+                      : row.quantity < 0 ? 'border-red-300 bg-red-50 text-red-700'
+                      : 'border-gray-300 bg-white text-gray-700';
+                    return (
+                      <tr key={row.id} className="border-t border-gray-100">
+                        <td className="px-3 py-2 font-mono text-xs text-gray-500">{row.skuId}</td>
+                        <td className="px-3 py-2 truncate max-w-[280px]">{row.skuName}</td>
+                        <td className="px-3 py-2 text-right">
+                          <input
+                            type="number"
+                            step="1"
+                            value={row.quantity}
+                            onChange={(e) => updateManualRow(row.id, { quantity: Number(e.target.value) || 0 })}
+                            disabled={readOnly}
+                            className={`w-24 border rounded-lg px-2 py-1 text-sm text-right font-semibold focus:outline-none focus:ring-2 focus:ring-yellow-400 ${qtyColor}`}
+                          />
+                        </td>
+                        <td className="px-3 py-2">
+                          <select
+                            value={row.reason || ''}
+                            onChange={(e) => updateManualRow(row.id, { reason: e.target.value || undefined })}
+                            disabled={readOnly}
+                            className="w-full border border-gray-300 rounded-lg px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                          >
+                            <option value="">-</option>
+                            {ADJUST_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
+                          </select>
+                        </td>
+                        <td className="px-3 py-2">
+                          <button
+                            onClick={() => removeManualRow(row.id)}
+                            disabled={readOnly}
+                            className="p-1 rounded text-gray-400 hover:text-red-600 hover:bg-red-50 disabled:opacity-50"
+                            title="삭제"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="text-center py-6 text-xs text-gray-400 bg-gray-50 rounded-lg">
+              추가된 행이 없습니다. 위 검색창에서 SKU를 찾아 추가하세요.
+            </div>
+          )}
+
+          {/* 직접 입력 저장 버튼 — 엑셀 파싱 결과가 없을 때만 단독 저장 */}
+          {parsedRows.length === 0 && manualRows.length > 0 && (
+            <div className="flex justify-end mt-4">
+              <button
+                onClick={() => setSaveConfirmOpen(true)}
+                disabled={readOnly || uploading || manualRows.filter((m) => m.quantity !== 0).length === 0}
+                className="bg-yellow-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-yellow-700 disabled:opacity-50"
+              >
+                {uploading ? '저장 중...' : `재고조정 ${manualRows.filter((m) => m.quantity !== 0).length}건 저장`}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 파싱 결과 */}
       {parsedRows.length > 0 && (
@@ -568,7 +845,7 @@ export default function SalesUpload() {
               날짜별 포맷 감지 — 각 행의 날짜를 개별 인식합니다
             </div>
           )}
-          <div className={`grid ${isPosDaily || isDateColumnFormat ? 'grid-cols-4' : 'grid-cols-3'} gap-3 mb-4`}>
+          <div className={`grid ${isAdjust ? 'grid-cols-4' : isPosDaily || isDateColumnFormat ? 'grid-cols-4' : 'grid-cols-3'} gap-3 mb-4`}>
             <div className="bg-white rounded-lg p-3 border">
               <div className="text-xs text-gray-500">매칭 성공</div>
               <div className={`text-lg font-bold text-${tabColor}-700`}>{matchedRows.length}건</div>
@@ -607,6 +884,17 @@ export default function SalesUpload() {
                   })()}
                 </div>
                 <div className="text-xs text-gray-400">{new Set(parsedRows.map(r => r.saleDate).filter(Boolean)).size}일</div>
+              </div>
+            )}
+            {isAdjust && (
+              <div className="bg-white rounded-lg p-3 border">
+                <div className="text-xs text-gray-500">증가/감소</div>
+                <div className="text-sm font-bold">
+                  <span className="text-blue-700">+{adjustIncrease}</span>
+                  <span className="text-gray-300 mx-1">/</span>
+                  <span className="text-red-700">-{adjustDecrease}</span>
+                </div>
+                <div className="text-xs text-gray-400">순변동 {adjustIncrease - adjustDecrease >= 0 ? '+' : ''}{adjustIncrease - adjustDecrease}</div>
               </div>
             )}
           </div>
@@ -648,7 +936,13 @@ export default function SalesUpload() {
                       <td className="px-2 py-1 font-mono">{r.barcode}</td>
                       <td className="px-2 py-1 text-gray-500">{r.skuId || '-'}</td>
                       <td className="px-2 py-1 truncate max-w-[200px]">{r.skuName || '미매칭'}</td>
-                      <td className="px-2 py-1 text-right font-semibold">{r.quantity}</td>
+                      <td className={`px-2 py-1 text-right font-semibold ${
+                        isAdjust
+                          ? r.quantity > 0 ? 'text-blue-700' : r.quantity < 0 ? 'text-red-700' : 'text-gray-500'
+                          : ''
+                      }`}>
+                        {isAdjust && r.quantity > 0 ? `+${r.quantity}` : r.quantity}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -750,14 +1044,29 @@ export default function SalesUpload() {
                 </span>
               </div>
               <div className="text-sm text-gray-600">
-                <span className="font-medium">{matchedRows.length}건</span>
-                {isDateColumnFormat && (
-                  <span className="ml-2 text-gray-400">
-                    ({new Set(matchedRows.map(r => r.saleDate).filter(Boolean)).size}일)
-                  </span>
-                )}
-                {!isDateColumnFormat && !isPosDaily && (
-                  <span className="ml-2 text-gray-400">({txDate})</span>
+                {isAdjust ? (
+                  <>
+                    <span className="font-medium">
+                      엑셀 {matchedRows.length}건 + 직접 {manualRows.filter((m) => m.quantity !== 0).length}건
+                    </span>
+                    <span className="ml-2 text-gray-400">
+                      (<span className="text-blue-700">+{adjustIncrease}</span>
+                      {' / '}
+                      <span className="text-red-700">-{adjustDecrease}</span>)
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="font-medium">{matchedRows.length}건</span>
+                    {isDateColumnFormat && (
+                      <span className="ml-2 text-gray-400">
+                        ({new Set(matchedRows.map(r => r.saleDate).filter(Boolean)).size}일)
+                      </span>
+                    )}
+                    {!isDateColumnFormat && !isPosDaily && (
+                      <span className="ml-2 text-gray-400">({txDate})</span>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -775,14 +1084,63 @@ export default function SalesUpload() {
         </div>
       )}
 
-      {/* 삭제 모달 */}
+      {/* 삭제 모달 — 미리보기 테이블 포함 */}
       {deleteModal && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setDeleteModal(null)}>
-          <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md mx-4" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-lg mx-4" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-bold text-gray-900 mb-1">데이터 삭제</h3>
-            <p className="text-sm text-gray-500 mb-4">
+            <p className="text-sm text-gray-500 mb-3">
               {deleteModal.date} {deleteModal.txType} 데이터 {deleteModal.count}건을 삭제합니다.
             </p>
+
+            {/* 미리보기 영역 */}
+            {deleteModal.previewLoading && (
+              <div className="flex items-center gap-2 py-4 justify-center text-sm text-gray-500">
+                <div className="w-4 h-4 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin" />
+                미리보기 로드 중...
+              </div>
+            )}
+            {!deleteModal.previewLoading && deleteModal.preview && deleteModal.preview.length > 0 && (() => {
+              const preview = deleteModal.preview!;
+              const totalIncrease = preview.filter((p) => p.deltaChange > 0).reduce((s, p) => s + p.deltaChange, 0);
+              const totalDecrease = preview.filter((p) => p.deltaChange < 0).reduce((s, p) => s + Math.abs(p.deltaChange), 0);
+              return (
+                <div className="mb-3">
+                  <p className="text-xs font-medium text-gray-600 mb-1">
+                    예상 재고 변동 — {preview.length}개 SKU
+                    {totalIncrease > 0 && <span className="text-green-700 ml-1">+{totalIncrease}</span>}
+                    {totalDecrease > 0 && <span className="text-red-700 ml-1">-{totalDecrease}</span>}
+                  </p>
+                  <div className="max-h-48 overflow-y-auto border border-gray-200 rounded-lg">
+                    <table className="w-full text-xs">
+                      <thead className="bg-gray-50 sticky top-0">
+                        <tr>
+                          <th className="text-left px-2 py-1.5 font-medium text-gray-600">SKU</th>
+                          <th className="text-right px-2 py-1.5 font-medium text-gray-600 w-16">변동</th>
+                          <th className="text-right px-2 py-1.5 font-medium text-gray-600 w-24">현재 → 변경후</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {preview.map((p, i) => (
+                          <tr key={i} className={p.afterQty <= 0 ? 'bg-yellow-50' : ''}>
+                            <td className="px-2 py-1.5 text-gray-800 truncate max-w-[180px]" title={`${p.skuId} — ${p.skuName}`}>
+                              {p.skuName}
+                            </td>
+                            <td className={`px-2 py-1.5 text-right font-medium ${p.deltaChange > 0 ? 'text-green-700' : p.deltaChange < 0 ? 'text-red-700' : 'text-gray-500'}`}>
+                              {p.deltaChange > 0 ? `+${p.deltaChange}` : p.deltaChange}
+                            </td>
+                            <td className="px-2 py-1.5 text-right text-gray-600">
+                              {p.currentQty} → <span className={p.afterQty <= 0 ? 'text-red-700 font-medium' : ''}>{p.afterQty}</span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })()}
+
             <label className="flex items-center gap-2 mb-4 cursor-pointer">
               <input
                 type="checkbox"
@@ -791,17 +1149,17 @@ export default function SalesUpload() {
                 className="w-4 h-4 rounded border-gray-300 text-red-600"
               />
               <span className="text-sm text-red-600 font-medium">
-                {deleteModal.count}건 삭제 확인 (복구 불가)
+                {deleteModal.count}건 삭제 + 재고 복구 확인
               </span>
             </label>
             <div className="flex justify-end gap-2">
               <button onClick={() => setDeleteModal(null)} className="px-4 py-2 rounded-lg text-sm border border-gray-300 hover:bg-gray-50">취소</button>
               <button
                 onClick={handleDelete}
-                disabled={readOnly || !deleteConfirm || deleting}
+                disabled={readOnly || !deleteConfirm || deleting || deleteModal.previewLoading}
                 className="bg-red-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50"
               >
-                {deleting ? '삭제 중...' : '삭제'}
+                {deleting ? '삭제 중...' : '삭제 + 재고 복구'}
               </button>
             </div>
           </div>

@@ -116,6 +116,17 @@ export interface InventoryTransaction {
 
 export type ActionType = 'shipment_confirm' | 'receipt_check' | 'marking_work' | 'shipment_out' | 'shipment_cancel_request' | 'shipment_cancel_approved' | 'shipment_modify_request' | 'shipment_modify_approved' | 'delete_shipment' | 'delete_receipt' | 'delete_marking' | 'delete_shipment_out' | 'rollback_shipment' | 'rollback_receipt' | 'rollback_marking' | 'rollback_shipment_out';
 
+/** 음수 재고 발생 예상 항목 (차감 전 경고용) */
+export interface NegativeStockItem {
+  skuId: string;
+  skuName: string;
+  warehouseName: string;
+  needsMarking: boolean;
+  currentQty: number;    // 현재 재고
+  deductQty: number;     // 차감 예정 수량
+  afterQty: number;      // 차감 후 예상 재고 (음수)
+}
+
 export interface ActivityLog {
   id: string;
   user_id: string;
@@ -126,6 +137,11 @@ export interface ActivityLog {
     items: { skuId: string; skuName: string; [key: string]: any }[];
     totalQty: number;
     workOrderDate?: string;
+    /** 음수 재고 발생 여부 (사용자가 경고 후 계속 진행한 경우 true) */
+    hasNegativeStock?: boolean;
+    /** 음수가 된 항목 상세 (추후 추적용) */
+    negativeStockItems?: NegativeStockItem[];
+    [key: string]: any;
   };
   created_at: string;
   user_profile?: { name: string; role: string };
