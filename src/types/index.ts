@@ -114,7 +114,7 @@ export interface InventoryTransaction {
   sku?: Sku;
 }
 
-export type ActionType = 'shipment_confirm' | 'receipt_check' | 'marking_work' | 'shipment_out' | 'shipment_cancel_request' | 'shipment_cancel_approved' | 'shipment_modify_request' | 'shipment_modify_approved' | 'delete_shipment' | 'delete_receipt' | 'delete_marking' | 'delete_shipment_out' | 'rollback_shipment' | 'rollback_receipt' | 'rollback_marking' | 'rollback_shipment_out';
+export type ActionType = 'shipment_confirm' | 'receipt_check' | 'marking_work' | 'shipment_out' | 'shipment_cancel_request' | 'shipment_cancel_approved' | 'shipment_modify_request' | 'shipment_modify_approved' | 'delete_shipment' | 'delete_receipt' | 'delete_marking' | 'delete_shipment_out' | 'rollback_shipment' | 'rollback_receipt' | 'rollback_marking' | 'rollback_shipment_out' | 'zero_all_remaining' | 'work_order_finish' | 'order_reclassify';
 
 export interface ActivityLog {
   id: string;

@@ -24,6 +24,11 @@ import {
 } from '../../lib/workOrderRollback';
 import type { WorkOrderStatus, AppUser } from '../../types';
 
+// 잔량 관리 가능 상태 (잔량 수정 + 남은 오더 0 처리 공통)
+const REMAINING_MANAGEABLE_STATUSES = ['이관중', '입고확인완료', '마킹중', '마킹완료'] as const;
+// 작업 종료 가능 상태 (이관준비 포함, 모든 진행 중 상태)
+const FINISHABLE_STATUSES = ['이관준비', '이관중', '입고확인완료', '마킹중', '마킹완료'] as const;
+
 interface DashboardProps {
   currentUser: AppUser;
 }
@@ -87,6 +92,23 @@ export default function Dashboard({ currentUser }: DashboardProps) {
   // 잔량 관리 모달
   const [remainingModal, setRemainingModal] = useState<{woId: string; woDate: string; lines: RemainingLine[]} | null>(null);
   const [savingRemaining, setSavingRemaining] = useState(false);
+
+  // 남은 오더 0 처리 모달 (readonly 미리보기)
+  const [zeroAllModal, setZeroAllModal] = useState<{
+    woId: string;
+    woDate: string;
+    lines: { id: string; finishedSkuId: string; skuName: string; orderedQty: number; sentQty: number; remaining: number }[];
+  } | null>(null);
+  const [executingZeroAll, setExecutingZeroAll] = useState(false);
+
+  // 작업 종료 모달 (readonly 미리보기)
+  const [finishModal, setFinishModal] = useState<{
+    woId: string;
+    woDate: string;
+    woStatus: string;
+    preview: { unsentLineCount: number; releasedOrderCount: number; totalLineCount: number };
+  } | null>(null);
+  const [executingFinish, setExecutingFinish] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -522,6 +544,137 @@ export default function Dashboard({ currentUser }: DashboardProps) {
     });
   };
 
+  // ── 남은 오더 0 처리 (원클릭) ──
+  const openZeroAllModal = async (wo: ActiveOrder) => {
+    try {
+      const { data: lines } = await supabase
+        .from('work_order_line')
+        .select('id, finished_sku_id, ordered_qty, sent_qty, finished_sku:sku!work_order_line_finished_sku_id_fkey(sku_name)')
+        .eq('work_order_id', wo.id);
+
+      const remainingLines = (lines || [])
+        .filter((l: any) => (l.ordered_qty || 0) > (l.sent_qty || 0))
+        .map((l: any) => ({
+          id: l.id,
+          finishedSkuId: l.finished_sku_id,
+          skuName: l.finished_sku?.sku_name || l.finished_sku_id,
+          orderedQty: l.ordered_qty,
+          sentQty: l.sent_qty || 0,
+          remaining: l.ordered_qty - (l.sent_qty || 0),
+        }));
+
+      setZeroAllModal({ woId: wo.id, woDate: wo.downloadDate, lines: remainingLines });
+    } catch (e: any) {
+      setError(`잔량 조회 실패: ${e.message}`);
+    }
+  };
+
+  // ── 작업 종료 (미발송분 분리 + work_order 출고완료) ──
+  const openFinishModal = async (wo: ActiveOrder) => {
+    try {
+      // 미발송 라인 카운트 조회
+      const { data: lines } = await supabase
+        .from('work_order_line')
+        .select('id, ordered_qty, sent_qty')
+        .eq('work_order_id', wo.id);
+      const unsentLines = (lines || []).filter((l: any) => (l.ordered_qty || 0) > (l.sent_qty || 0));
+
+      // 복귀 대상 online_order 카운트 조회
+      const { count: releasedCount } = await supabase
+        .from('online_order')
+        .select('id', { count: 'exact', head: true })
+        .eq('work_order_id', wo.id)
+        .in('status', ['신규', '발송대기', '이관중', '마킹중', '마킹완료', '재고부족']);
+
+      setFinishModal({
+        woId: wo.id,
+        woDate: wo.downloadDate,
+        woStatus: wo.status,
+        preview: {
+          unsentLineCount: unsentLines.length,
+          releasedOrderCount: releasedCount || 0,
+          totalLineCount: lines?.length || 0,
+        },
+      });
+    } catch (e: any) {
+      setError(`작업 종료 미리보기 조회 실패: ${e.message}`);
+    }
+  };
+
+  const executeFinish = async () => {
+    if (!finishModal || executingFinish || isStale()) return;
+    setExecutingFinish(true);
+    try {
+      // RPC 호출 (미발송 라인 조정 + online_order 복귀 + status 출고완료)
+      const { data: rpcData, error: rpcErr } = await supabase
+        .rpc('finish_work_order', { p_work_order_id: finishModal.woId });
+      if (rpcErr) throw rpcErr;
+
+      const result = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+
+      // activity_log 기록
+      await supabase.from('activity_log').insert({
+        user_id: currentUser.id,
+        action_type: 'work_order_finish',
+        work_order_id: finishModal.woId,
+        action_date: new Date().toISOString().slice(0, 10),
+        summary: {
+          prevStatus: finishModal.woStatus,
+          newStatus: '출고완료',
+          unsentLines: result?.unsent_lines ?? finishModal.preview.unsentLineCount,
+          releasedOrders: result?.released_orders ?? finishModal.preview.releasedOrderCount,
+          totalLines: result?.completed_lines ?? finishModal.preview.totalLineCount,
+          reason: '관리자 작업 종료 (미발송분 분리)',
+        },
+      });
+
+      setFinishModal(null);
+      setSuccessMsg(`작업지시서가 종료되었습니다. 미발송 주문 ${result?.released_orders ?? 0}건이 신규로 복귀됨.`);
+      await loadData();
+    } catch (e: any) {
+      setError(`작업 종료 실패: ${e.message}`);
+    } finally {
+      setExecutingFinish(false);
+    }
+  };
+
+  const executeZeroAll = async () => {
+    if (!zeroAllModal || executingZeroAll || isStale()) return;
+    setExecutingZeroAll(true);
+    try {
+      // 1. RPC 호출 (원자적 UPDATE: ordered_qty = sent_qty WHERE ordered_qty > sent_qty)
+      const { data: updatedCount, error: rpcErr } = await supabase
+        .rpc('zero_all_remaining', { p_work_order_id: zeroAllModal.woId });
+      if (rpcErr) throw rpcErr;
+
+      // 2. activity_log 기록
+      await supabase.from('activity_log').insert({
+        user_id: currentUser.id,
+        action_type: 'zero_all_remaining',
+        work_order_id: zeroAllModal.woId,
+        action_date: new Date().toISOString().slice(0, 10),
+        summary: {
+          items: zeroAllModal.lines.map(l => ({
+            skuId: l.finishedSkuId,
+            skuName: l.skuName,
+            before: l.orderedQty,
+            after: l.sentQty,
+          })),
+          totalQty: zeroAllModal.lines.reduce((s, l) => s + l.remaining, 0),
+          reason: '관리자 남은 오더 일괄 0 처리',
+        },
+      });
+
+      setZeroAllModal(null);
+      setSuccessMsg(`남은 오더 ${updatedCount ?? zeroAllModal.lines.length}건이 0 처리되었습니다.`);
+      await loadData();
+    } catch (e: any) {
+      setError(`남은 오더 0 처리 실패: ${e.message}`);
+    } finally {
+      setExecutingZeroAll(false);
+    }
+  };
+
   const statusColor: Record<string, string> = {
     업로드됨: 'bg-gray-100 text-gray-700',
     이관준비: 'bg-yellow-100 text-yellow-700',
@@ -675,14 +828,34 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                             처리
                           </button>
                         )}
-                        {['이관중', '입고확인완료', '마킹중', '마킹완료'].includes(wo.status) && (
+                        {REMAINING_MANAGEABLE_STATUSES.includes(wo.status as any) && (
+                          <>
+                            <button
+                              onClick={() => openRemainingModal(wo)}
+                              disabled={readOnly}
+                              className="px-2.5 py-1 text-xs font-medium text-amber-600 bg-amber-50 rounded-lg hover:bg-amber-100 flex items-center gap-1 disabled:opacity-50"
+                              title="잔량 수정"
+                            >
+                              잔량 수정
+                            </button>
+                            <button
+                              onClick={() => openZeroAllModal(wo)}
+                              disabled={readOnly}
+                              className="px-2.5 py-1 text-xs font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 flex items-center gap-1 disabled:opacity-50"
+                              title="남은 오더 전부 0으로 처리"
+                            >
+                              남은 오더 0
+                            </button>
+                          </>
+                        )}
+                        {FINISHABLE_STATUSES.includes(wo.status as any) && (
                           <button
-                            onClick={() => openRemainingModal(wo)}
+                            onClick={() => openFinishModal(wo)}
                             disabled={readOnly}
-                            className="px-2.5 py-1 text-xs font-medium text-amber-600 bg-amber-50 rounded-lg hover:bg-amber-100 flex items-center gap-1 disabled:opacity-50"
-                            title="잔량 수정"
+                            className="px-2.5 py-1 text-xs font-medium text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 flex items-center gap-1 disabled:opacity-50"
+                            title="작업 종료 — 미발송분 신규 복귀 + 작업지시서 출고완료"
                           >
-                            잔량 수정
+                            작업 종료
                           </button>
                         )}
                         <button
@@ -1136,6 +1309,143 @@ export default function Dashboard({ currentUser }: DashboardProps) {
                 className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
               >
                 {savingRemaining ? '저장 중...' : '저장'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ── 남은 오더 0 처리 미리보기 모달 ── */}
+      {zeroAllModal && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onClick={executingZeroAll ? undefined : () => setZeroAllModal(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl max-w-lg w-full max-h-[80vh] overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-gray-100">
+              <h3 className="text-lg font-bold text-gray-900">남은 오더 일괄 0 처리</h3>
+              <p className="text-sm text-gray-500">{zeroAllModal.woDate} 작업지시서</p>
+            </div>
+
+            {/* 경고 배너 */}
+            <div className="px-5 pt-4">
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3 flex items-start gap-2">
+                <AlertTriangle size={16} className="text-red-500 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-semibold text-red-800">
+                    {zeroAllModal.lines.length}개 라인, 총 {zeroAllModal.lines.reduce((s, l) => s + l.remaining, 0)}개 잔량이 취소됩니다
+                  </p>
+                  <p className="text-xs text-red-600 mt-0.5">주문수량이 발송완료 수량으로 변경됩니다. 재고는 건드리지 않습니다.</p>
+                </div>
+              </div>
+            </div>
+
+            {/* 라인 목록 (읽기 전용) */}
+            <div className="px-5 py-4 space-y-2 max-h-[45vh] overflow-y-auto">
+              {zeroAllModal.lines.length === 0 ? (
+                <p className="text-sm text-gray-400 text-center py-4">잔량이 있는 항목이 없습니다.</p>
+              ) : (
+                zeroAllModal.lines.map((line) => (
+                  <div key={line.id} className="border border-gray-200 rounded-lg p-3">
+                    <p className="text-sm font-medium text-gray-800 truncate" title={line.skuName}>{line.skuName}</p>
+                    <p className="text-xs text-gray-400">{line.finishedSkuId}</p>
+                    <div className="flex items-center gap-4 mt-2 text-xs">
+                      <span className="text-gray-500">주문: {line.orderedQty}</span>
+                      <span className="text-gray-500">발송: {line.sentQty}</span>
+                      <span className="text-red-600 font-semibold">취소: -{line.remaining}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <div className="px-5 py-4 border-t border-gray-100 flex justify-end gap-2">
+              <button
+                onClick={() => setZeroAllModal(null)}
+                disabled={executingZeroAll}
+                className="px-4 py-2 text-sm text-gray-600 border rounded-lg hover:bg-gray-50 disabled:opacity-50"
+              >
+                취소
+              </button>
+              <button
+                onClick={executeZeroAll}
+                disabled={readOnly || executingZeroAll || zeroAllModal.lines.length === 0}
+                className="px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50"
+              >
+                {executingZeroAll ? '처리 중...' : `${zeroAllModal.lines.length}건 일괄 0 처리`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ── 작업 종료 미리보기 모달 ── */}
+      {finishModal && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onClick={executingFinish ? undefined : () => setFinishModal(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-xl max-w-md w-full overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-gray-100">
+              <h3 className="text-lg font-bold text-gray-900">작업 종료</h3>
+              <p className="text-sm text-gray-500">{finishModal.woDate} 작업지시서 · 현재 {finishModal.woStatus}</p>
+            </div>
+
+            <div className="px-5 py-4 space-y-3">
+              {/* 요약 배너 */}
+              <div className="bg-gray-50 border border-gray-200 rounded-xl p-4">
+                <div className="grid grid-cols-3 gap-3 text-center">
+                  <div>
+                    <p className="text-2xl font-bold text-gray-800">{finishModal.preview.totalLineCount}</p>
+                    <p className="text-xs text-gray-500 mt-1">전체 라인</p>
+                  </div>
+                  <div>
+                    <p className="text-2xl font-bold text-orange-600">{finishModal.preview.unsentLineCount}</p>
+                    <p className="text-xs text-gray-500 mt-1">미발송 라인</p>
+                  </div>
+                  <div>
+                    <p className="text-2xl font-bold text-blue-600">{finishModal.preview.releasedOrderCount}</p>
+                    <p className="text-xs text-gray-500 mt-1">복귀될 주문</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* 설명 */}
+              <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-3">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle size={16} className="text-yellow-600 flex-shrink-0 mt-0.5" />
+                  <div className="text-xs text-yellow-800 space-y-1">
+                    <p className="font-semibold">실행 시 변화</p>
+                    <ul className="list-disc list-inside space-y-0.5 text-yellow-700">
+                      <li>미발송 라인의 주문수량을 발송완료 수량으로 조정</li>
+                      <li>연결된 미발송 고객 주문({finishModal.preview.releasedOrderCount}건) → <strong>'신규' 상태로 복귀</strong></li>
+                      <li>작업지시서 상태 → <strong>'출고완료'</strong></li>
+                      <li>모든 화면(대시보드, 발송확인, 플레이위즈)에서 사라짐</li>
+                      <li>다음 작업지시서 생성 시 복귀된 주문 자동 포함</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="px-5 py-4 border-t border-gray-100 flex justify-end gap-2">
+              <button
+                onClick={() => setFinishModal(null)}
+                disabled={executingFinish}
+                className="px-4 py-2 text-sm text-gray-600 border rounded-lg hover:bg-gray-50 disabled:opacity-50"
+              >
+                취소
+              </button>
+              <button
+                onClick={executeFinish}
+                disabled={readOnly || executingFinish}
+                className="px-4 py-2 text-sm bg-gray-800 text-white rounded-lg hover:bg-gray-900 disabled:opacity-50"
+              >
+                {executingFinish ? '종료 중...' : '작업 종료 실행'}
               </button>
             </div>
           </div>

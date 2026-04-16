@@ -95,6 +95,11 @@ export function parseOrderExcel(wb: XLSX.WorkBook): OrderParseResult {
     // 오프라인 출고 대상: 유니폼(26UN-*) 또는 마킹키트(26MK-*)만
     const needsOfflineShipment = skuId.startsWith('26UN-') || skuId.startsWith('26MK-');
 
+    // 배송상태 정규화: 앞뒤 공백 + 모든 내부 공백/NBSP/특수문자 제거
+    // (베리즈 엑셀에 "배송완료 " 뒤 공백, NBSP, zero-width space 등이 섞이는 경우 방어)
+    const rawStatus = String(row[colIdx.status] || '');
+    const deliveryStatus = rawStatus.replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
+
     orders.push({
       orderNumber,
       deliveryNumber: String(row[colIdx.deliveryNo] || '').trim(),
@@ -106,7 +111,7 @@ export function parseOrderExcel(wb: XLSX.WorkBook): OrderParseResult {
       needsMarking,
       needsOfflineShipment,
       markingType,
-      deliveryStatus: String(row[colIdx.status] || '').trim(),
+      deliveryStatus,
     });
 
     orderNumbers.add(orderNumber);

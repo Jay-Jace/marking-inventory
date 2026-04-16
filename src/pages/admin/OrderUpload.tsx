@@ -36,6 +36,8 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
   const [parseSummary, setParseSummary] = useState<any>(null);
   const [newOrders, setNewOrders] = useState<ParsedOrder[]>([]);
   const [autoCompleteOrders, setAutoCompleteOrders] = useState<{ orderNumber: string; skuId: string; id: string }[]>([]); // 자동 출고완료 대상
+  const [reworkOrders, setReworkOrders] = useState<{ orderNumber: string; skuId: string; id: string }[]>([]); // 재작업 대상 (출고완료 → 신규)
+  const [cancelOrders, setCancelOrders] = useState<{ orderNumber: string; skuId: string; id: string }[]>([]); // 취소 대상 (엑셀 배송취소)
   // revertOrders 제거됨: 출고완료/마킹중/마킹완료 주문은 스킵 처리
   const [skipCount, setSkipCount] = useState(0); // 작업 진행중/중복 스킵
   const [saving, setSaving] = useState(false);
@@ -141,10 +143,35 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
       setParsed(uniformOnly);
       setParseSummary({ ...result.summary, total: uniformOnly.length, noMarking: uniformOnly.filter(o => !o.needsMarking).length });
 
+      // ── 배송상태 정규화 헬퍼 (파서에서 정규화했지만 2중 방어) ──
+      const normalizeStatus = (s: string) => (s || '').replace(/[\s\u00A0\u200B\u200C\u200D\uFEFF]/g, '').trim();
+      const isCompleted = (s: string) => {
+        const n = normalizeStatus(s);
+        return n === '배송완료' || n === '배송중' || n === '배송준비중';
+      };
+      const isCanceled = (s: string) => normalizeStatus(s) === '배송취소';
+      const isPending = (s: string) => {
+        const n = normalizeStatus(s);
+        return n === '배송대기' || (n !== '배송완료' && n !== '배송중' && n !== '배송준비중' && n !== '배송취소');
+      };
+
       // ── Case 1: 배송준비중/배송중/배송완료 → 물류센터 처리됨 → 자동 출고완료 ──
-      const completedStatuses = ['배송준비중', '배송중', '배송완료'];
-      const caseAutoComplete = uniformOnly.filter(o => completedStatuses.includes(o.deliveryStatus));
-      const casePending = uniformOnly.filter(o => !completedStatuses.includes(o.deliveryStatus)); // 배송대기
+      const caseAutoComplete = uniformOnly.filter(o => isCompleted(o.deliveryStatus));
+      // ── Case 4-C: 배송취소 → 취소 처리 ──
+      const caseCancel = uniformOnly.filter(o => isCanceled(o.deliveryStatus));
+      // 배송대기 (Case 2/3/4-A 대상)
+      const casePending = uniformOnly.filter(o => isPending(o.deliveryStatus));
+
+      // [디버그] 실제 파싱된 배송상태 분포 확인 — 문제 해결 후 제거
+      const statusDist: Record<string, number> = {};
+      for (const o of uniformOnly) {
+        const raw = o.deliveryStatus;
+        const key = `[${raw}] → norm:[${normalizeStatus(raw)}]`;
+        statusDist[key] = (statusDist[key] || 0) + 1;
+      }
+      console.log('[DEBUG] 배송상태 분포:', statusDist);
+      console.log('[DEBUG] caseAutoComplete:', caseAutoComplete.length, '/ casePending:', casePending.length, '/ caseCancel:', caseCancel.length);
+      console.log('[DEBUG] orders(DB기존) count:', orders.length);
 
       // 자동 출고완료 대상: 우리 시스템에 존재하면서 아직 출고완료/취소 아닌 주문
       const autoCompleteTargets: typeof autoCompleteOrders = [];
@@ -171,14 +198,18 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
 
       let skipCnt = 0;
       const newOnes: ParsedOrder[] = [];
+      const reworkTargets: { orderNumber: string; skuId: string; id: string }[] = [];
       for (const o of casePending) {
         const key = `${o.orderNumber}|${o.skuId}`;
         const existing = existingMap.get(key);
         if (activeWoOrderSet.has(key)) {
           // Case 2: 작업 진행중 → 스킵
           skipCnt++;
-        } else if (existing && ['출고완료', '마킹중', '마킹완료'].includes(existing.status)) {
-          // 출고완료/마킹중/마킹완료 → 스킵 (작업지시서 대상에서 제외)
+        } else if (existing && existing.status === '출고완료') {
+          // Case 4-A: 엑셀 배송대기 + DB 출고완료 → 재작업 (신규로 복귀)
+          reworkTargets.push({ orderNumber: o.orderNumber, skuId: o.skuId, id: existing.id });
+        } else if (existing && ['마킹중', '마킹완료'].includes(existing.status)) {
+          // 마킹중/마킹완료 → 스킵 (이미 작업지시서에 있음)
           skipCnt++;
         } else if (existing) {
           // 이미 존재 (신규/재고부족 등) → 중복이므로 스킵
@@ -189,8 +220,20 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         }
       }
 
+      // Case 4-C: 배송취소 처리 대상 (DB status != '취소' 인 기존 주문)
+      const cancelTargets: { orderNumber: string; skuId: string; id: string }[] = [];
+      for (const o of caseCancel) {
+        const key = `${o.orderNumber}|${o.skuId}`;
+        const existing = existingMap.get(key);
+        if (existing && existing.status !== '취소') {
+          cancelTargets.push({ orderNumber: o.orderNumber, skuId: o.skuId, id: existing.id });
+        }
+      }
+
       setNewOrders(newOnes);
       setSkipCount(skipCnt);
+      setReworkOrders(reworkTargets);
+      setCancelOrders(cancelTargets);
 
       // 재고 부족 체크 (오프라인 매장)
       await checkInventoryShortage(newOnes);
@@ -326,14 +369,16 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
 
   // ── 저장 ──
   const handleSave = async () => {
-    if (newOrders.length === 0 && autoCompleteOrders.length === 0) return;
+    if (newOrders.length === 0 && autoCompleteOrders.length === 0 && reworkOrders.length === 0 && cancelOrders.length === 0) return;
     setSaving(true);
-    const totalWork = newOrders.length + autoCompleteOrders.length;
+    const totalWork = newOrders.length + autoCompleteOrders.length + reworkOrders.length + cancelOrders.length;
     setSaveProgress({ current: 0, total: totalWork });
 
     try {
       let ok = 0;
       let autoOk = 0;
+      let reworkOk = 0;
+      let cancelOk = 0;
 
       // ── Case 1 처리: 배송준비중/배송중/배송완료 → 출고완료 자동 처리 ──
       if (autoCompleteOrders.length > 0) {
@@ -345,6 +390,32 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             .in('id', ids.slice(i, i + 100));
           autoOk += Math.min(100, ids.length - i);
           setSaveProgress({ current: autoOk, total: totalWork });
+        }
+      }
+
+      // ── Case 4-A 처리: 엑셀 배송대기 + DB 출고완료 → 재작업 (신규로 복귀) ──
+      if (reworkOrders.length > 0) {
+        const ids = reworkOrders.map(o => o.id);
+        for (let i = 0; i < ids.length; i += 100) {
+          await supabaseAdmin
+            .from('online_order')
+            .update({ status: '신규', work_order_id: null })
+            .in('id', ids.slice(i, i + 100));
+          reworkOk += Math.min(100, ids.length - i);
+          setSaveProgress({ current: autoOk + reworkOk, total: totalWork });
+        }
+      }
+
+      // ── Case 4-C 처리: 엑셀 배송취소 → 취소 ──
+      if (cancelOrders.length > 0) {
+        const ids = cancelOrders.map(o => o.id);
+        for (let i = 0; i < ids.length; i += 100) {
+          await supabaseAdmin
+            .from('online_order')
+            .update({ status: '취소' })
+            .in('id', ids.slice(i, i + 100));
+          cancelOk += Math.min(100, ids.length - i);
+          setSaveProgress({ current: autoOk + reworkOk + cancelOk, total: totalWork });
         }
       }
 
@@ -374,17 +445,28 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
         user_id: currentUserId,
         action_type: 'order_upload',
         action_date: new Date().toISOString().split('T')[0],
-        summary: { total: ok, autoComplete: autoOk, skipped: skipCount, marking: newOrders.filter(o => o.needsMarking).length },
+        summary: {
+          total: ok,
+          autoComplete: autoOk,
+          rework: reworkOk,
+          cancel: cancelOk,
+          skipped: skipCount,
+          marking: newOrders.filter(o => o.needsMarking).length,
+        },
       }).then(() => {});
 
       const parts: string[] = [];
       if (ok > 0) parts.push(`신규 ${ok}건 등록`);
       if (autoOk > 0) parts.push(`출고완료 ${autoOk}건 자동 처리`);
+      if (reworkOk > 0) parts.push(`재작업 ${reworkOk}건 (출고완료→신규)`);
+      if (cancelOk > 0) parts.push(`취소 ${cancelOk}건`);
       if (skipCount > 0) parts.push(`진행중/중복 ${skipCount}건 제외`);
       setMessage({ type: 'success', text: parts.join(' / ') });
       setParsed(null);
       setNewOrders([]);
       setAutoCompleteOrders([]);
+      setReworkOrders([]);
+      setCancelOrders([]);
       setSkipCount(0);
       loadDashboard();
     } catch (err: any) {
@@ -985,7 +1067,7 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           <h2 className="font-semibold text-gray-900">업로드 미리보기</h2>
 
           {/* 요약 카드 — 분류 결과 */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
             <div className="bg-gray-50 rounded-lg p-3 text-center">
               <p className="text-xs text-gray-500">엑셀 전체</p>
               <p className="text-lg font-bold">{parseSummary.total}</p>
@@ -997,6 +1079,14 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
             <div className="bg-green-50 rounded-lg p-3 text-center">
               <p className="text-xs text-green-600">자동 출고완료</p>
               <p className="text-lg font-bold text-green-700">{autoCompleteOrders.length}</p>
+            </div>
+            <div className="bg-yellow-50 rounded-lg p-3 text-center">
+              <p className="text-xs text-yellow-700">재작업</p>
+              <p className="text-lg font-bold text-yellow-700">{reworkOrders.length}</p>
+            </div>
+            <div className="bg-red-50 rounded-lg p-3 text-center">
+              <p className="text-xs text-red-600">취소</p>
+              <p className="text-lg font-bold text-red-700">{cancelOrders.length}</p>
             </div>
             <div className="bg-gray-50 rounded-lg p-3 text-center">
               <p className="text-xs text-gray-500">진행중/중복</p>
@@ -1091,18 +1181,20 @@ export default function OrderUpload({ currentUserId }: { currentUserId: string }
           <div className="flex gap-2">
             <button
               onClick={handleSave}
-              disabled={readOnly || saving || (newOrders.length === 0 && autoCompleteOrders.length === 0)}
+              disabled={readOnly || saving || (newOrders.length === 0 && autoCompleteOrders.length === 0 && reworkOrders.length === 0 && cancelOrders.length === 0)}
               className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:bg-gray-300"
             >
               {saving ? '저장 중...' : (() => {
                 const parts = [];
                 if (newOrders.length > 0) parts.push(`신규 ${newOrders.length}`);
                 if (autoCompleteOrders.length > 0) parts.push(`자동완료 ${autoCompleteOrders.length}`);
+                if (reworkOrders.length > 0) parts.push(`재작업 ${reworkOrders.length}`);
+                if (cancelOrders.length > 0) parts.push(`취소 ${cancelOrders.length}`);
                 return `처리 (${parts.join(' + ')}건)`;
               })()}
             </button>
             <button
-              onClick={() => { setParsed(null); setNewOrders([]); setAutoCompleteOrders([]); setSkipCount(0); setShortageItems([]); setBomMissing([]); }}
+              onClick={() => { setParsed(null); setNewOrders([]); setAutoCompleteOrders([]); setReworkOrders([]); setCancelOrders([]); setSkipCount(0); setShortageItems([]); setBomMissing([]); }}
               disabled={saving}
               className="px-5 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm hover:bg-gray-200 disabled:opacity-50"
             >
